@@ -180,6 +180,11 @@
     .cx-method-pill.ticket { background:rgba(124,58,237,0.15); color:#6d28d9; }
     .cx-method-pill.credit { background:rgba(220,38,38,0.12); color:#b91c1c; }
     .cx-method-pill.echel { background:rgba(8,145,178,0.15); color:#0e7490; }
+    .cx-method-pill.points { background:rgba(124,58,237,0.15); color:#6d28d9; }
+    .cx-client-badge { display:inline-block; padding:2px 9px; border-radius:20px; font-size:0.68rem; font-weight:700; white-space:nowrap; }
+    .cx-client-badge.cx-client-credit { background:rgba(180,83,9,0.12); color:#92400e; }
+    .cx-client-badge.cx-client-loyalty { background:rgba(139,92,246,0.12); color:#6d28d9; }
+    #cx-hist-summary { font-size:0.8rem; font-weight:700; color:var(--text-muted); margin:-4px 0 12px; }
     .cx-hist-detail td { background:var(--bg-card-2); }
     .cx-hist-detail .item-line { display:flex; justify-content:space-between; font-size:0.78rem; padding:3px 0; }
 
@@ -349,11 +354,22 @@
 <!-- ===================== PANNEAU HISTORIQUE ===================== -->
 <div class="cx-panel" id="cx-panel-historique" style="display:none;">
     <div class="cx-toolbar">
-        <input type="text" id="cx-hist-search" class="cx-input" placeholder="🔍 Caissier, n° ticket, mode…" oninput="cxRenderHistory()" style="flex:2;min-width:160px;">
+        <input type="text" id="cx-hist-search" class="cx-input" placeholder="🔍 Caissier, n° ticket, mode, client…" oninput="cxRenderHistory()" style="flex:2;min-width:160px;">
+        <select id="cx-hist-method" class="cx-input" onchange="cxRenderHistory()">
+            <option value="">Tous les modes</option>
+            <option value="cash">💶 Espèces</option>
+            <option value="cb">💳 CB</option>
+            <option value="mixed">💳💶 Mixte</option>
+            <option value="ticket">🎟️ Ticket resto</option>
+            <option value="credit">📒 Crédit</option>
+            <option value="echel">📅 Échelonné</option>
+            <option value="points">🎁 Points</option>
+        </select>
         <input type="date" id="cx-hist-from" class="cx-input" onchange="cxRenderHistory()">
         <input type="date" id="cx-hist-to" class="cx-input" onchange="cxRenderHistory()">
-        <button class="cx-input" style="cursor:pointer;font-weight:700;background:var(--bg-card-2);" onclick="document.getElementById('cx-hist-search').value='';document.getElementById('cx-hist-from').value='';document.getElementById('cx-hist-to').value='';cxRenderHistory();">✕ Filtres</button>
+        <button class="cx-input" style="cursor:pointer;font-weight:700;background:var(--bg-card-2);" onclick="document.getElementById('cx-hist-search').value='';document.getElementById('cx-hist-from').value='';document.getElementById('cx-hist-to').value='';document.getElementById('cx-hist-method').value='';cxRenderHistory();">✕ Filtres</button>
     </div>
+    <div id="cx-hist-summary"></div>
     <div class="cx-table-wrap">
         <table class="cx-hist-table">
             <thead>
@@ -361,6 +377,7 @@
                     <th>Ticket</th>
                     <th>Date / heure</th>
                     <th>Caissier</th>
+                    <th>Client</th>
                     <th>Articles</th>
                     <th>Total</th>
                     <th>Mode</th>
@@ -1194,24 +1211,49 @@ function cxShowReceipt(sale) {
 function cxRenderHistory() {
     var tbody = document.getElementById('cx-hist-tbody');
     var emptyEl = document.getElementById('cx-hist-empty');
+    var summaryEl = document.getElementById('cx-hist-summary');
     if (!tbody) return;
     var hist = [];
     try { hist = JSON.parse(localStorage.getItem('covo_sales_history')) || []; } catch(e) { hist = []; }
 
+    // Numéro de ticket affiché : utilise le vrai n° séquentiel de la vente (sale.ticketNum, réservé
+    // au moment de l'impression du reçu) quand il existe. Sinon, plutôt que d'afficher l'identifiant
+    // brut (un horodatage à 13 chiffres, illisible), on calcule un numéro de secours court et stable
+    // basé sur le rang chronologique de la vente dans l'historique complet.
+    var _tnFallback = {};
+    try {
+        var _histAsc = hist.slice().sort(function(a,b){ return new Date(a.date) - new Date(b.date); });
+        _histAsc.forEach(function(s, i){ _tnFallback[s.id] = i + 1; });
+    } catch(e) {}
+    function cxDisplayTicketNum(s) {
+        if (s.ticketNum != null) return s.ticketNum;
+        return _tnFallback[s.id] != null ? _tnFallback[s.id] : s.id;
+    }
+
     var q = (document.getElementById('cx-hist-search').value || '').trim().toLowerCase();
     var from = document.getElementById('cx-hist-from').value;
     var to = document.getElementById('cx-hist-to').value;
+    var methodEl = document.getElementById('cx-hist-method');
+    var methodFilter = methodEl ? methodEl.value : '';
 
     var list = hist.filter(function(s){
         if (from) { var fd = new Date(from + 'T00:00:00'); if (new Date(s.date) < fd) return false; }
         if (to)   { var td = new Date(to   + 'T23:59:59'); if (new Date(s.date) > td) return false; }
+        if (methodFilter && s.method !== methodFilter) return false;
         if (q) {
-            var hay = ((s.cashier||'') + ' ' + (s.ticketNum||'') + ' ' + (s.method||'')).toLowerCase();
+            var hay = ((s.cashier||'') + ' ' + (s.ticketNum||'') + ' ' + (s.method||'') + ' ' + (s.creditCustomerName||'') + ' ' + (s.loyaltyCustomerName||'')).toLowerCase();
             if (hay.indexOf(q) === -1) return false;
         }
         return true;
     });
     list.sort(function(a,b){ return new Date(b.date) - new Date(a.date); });
+
+    if (summaryEl) {
+        var totalCA = list.reduce(function(sum,s){ return sum + (parseFloat(s.total)||0); }, 0);
+        summaryEl.textContent = list.length
+            ? ('🧾 ' + list.length + ' ticket' + (list.length > 1 ? 's' : '') + ' · 💰 ' + totalCA.toFixed(2) + ' € cumulé')
+            : '';
+    }
 
     if (!list.length) {
         tbody.innerHTML = '';
@@ -1223,13 +1265,20 @@ function cxRenderHistory() {
     var rows = [];
     list.forEach(function(s){
         var itemsCount = Array.isArray(s.items) ? s.items.reduce(function(n,it){ return n + (it.unitType==='kg' ? 1 : (it.quantity||1)); }, 0) : 0;
-        var methodClass = ['cash','cb','mixed','ticket','credit','echel'].indexOf(s.method) !== -1 ? s.method : 'cb';
-        var methodLabel = { cash:'Espèces', cb:'CB', mixed:'Mixte', ticket:'Ticket resto', credit:'Crédit', echel:'Échelonné' }[s.method] || (s.method || '—');
+        var methodClass = ['cash','cb','mixed','ticket','credit','echel','points'].indexOf(s.method) !== -1 ? s.method : 'cb';
+        var methodLabel = { cash:'Espèces', cb:'CB', mixed:'Mixte', ticket:'Ticket resto', credit:'Crédit', echel:'Échelonné', points:'Points' }[s.method] || (s.method || '—');
+        // Traçabilité crédit / fidélité (renseignée par COVO Pro au moment de la vente).
+        var clientBadge = (s.method === 'credit' && s.creditCustomerName)
+            ? '<span class="cx-client-badge cx-client-credit">📒 ' + cxEsc(s.creditCustomerName) + '</span>'
+            : (s.loyaltyCustomerName
+                ? '<span class="cx-client-badge cx-client-loyalty">🎁 ' + cxEsc(s.loyaltyCustomerName) + '</span>'
+                : '<span style="color:var(--text-muted);">—</span>');
         rows.push(
             '<tr class="cx-hist-row" onclick="cxToggleSaleDetail(' + JSON.stringify(s.id) + ')">'
-            + '<td>#' + cxEsc(s.ticketNum != null ? s.ticketNum : s.id) + '</td>'
+            + '<td>#' + cxEsc(cxDisplayTicketNum(s)) + '</td>'
             + '<td>' + new Date(s.date).toLocaleString('fr-FR') + '</td>'
             + '<td>' + cxEsc(s.cashier || '—') + '</td>'
+            + '<td>' + clientBadge + '</td>'
             + '<td>' + itemsCount + '</td>'
             + '<td><strong>' + (parseFloat(s.total)||0).toFixed(2) + ' €</strong></td>'
             + '<td><span class="cx-method-pill ' + methodClass + '">' + methodLabel + '</span></td>'
@@ -1240,7 +1289,7 @@ function cxRenderHistory() {
                 var qtyDisp = it.unitType === 'kg' ? (it.quantity||0).toFixed(3) + ' kg' : 'x' + it.quantity;
                 return '<div class="item-line"><span>' + cxEsc(it.name) + ' (' + qtyDisp + ')</span><span>' + cxLineTotal(it).toFixed(2) + ' €</span></div>';
             }).join('') || '<div class="item-line"><span>—</span></div>';
-            rows.push('<tr class="cx-hist-detail"><td colspan="6">' + itemsHtml + '</td></tr>');
+            rows.push('<tr class="cx-hist-detail"><td colspan="7">' + itemsHtml + '</td></tr>');
         }
     });
     tbody.innerHTML = rows.join('');
