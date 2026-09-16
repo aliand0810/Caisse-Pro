@@ -1217,16 +1217,22 @@ function cxRenderHistory() {
     try { hist = JSON.parse(localStorage.getItem('covo_sales_history')) || []; } catch(e) { hist = []; }
 
     // Numéro de ticket affiché : utilise le vrai n° séquentiel de la vente (sale.ticketNum, réservé
-    // au moment de l'impression du reçu) quand il existe. Sinon, plutôt que d'afficher l'identifiant
-    // brut (un horodatage à 13 chiffres, illisible), on calcule un numéro de secours court et stable
-    // basé sur le rang chronologique de la vente dans l'historique complet.
+    // au moment de l'impression du reçu via le compteur covo_settings.rcpt.ticketCounter) quand il
+    // s'agit réellement d'un petit compteur. ATTENTION : le fichier principal fait parfois
+    // `sale.ticketNum = _rcpt.ticketCounter || sale.id`, donc certaines ventes ont un ticketNum qui
+    // N'EST EN RÉALITÉ QUE l'identifiant brut de la vente recopié tel quel (un horodatage à 13
+    // chiffres, ex. #1789549857061 — pas un vrai numéro de ticket de caisse). On détecte ce cas
+    // (valeur à plus de 8 chiffres) et on retombe alors, comme pour un ticketNum absent, sur un
+    // numéro de secours court et stable basé sur le rang chronologique de la vente dans
+    // l'historique complet.
     var _tnFallback = {};
     try {
         var _histAsc = hist.slice().sort(function(a,b){ return new Date(a.date) - new Date(b.date); });
         _histAsc.forEach(function(s, i){ _tnFallback[s.id] = i + 1; });
     } catch(e) {}
     function cxDisplayTicketNum(s) {
-        if (s.ticketNum != null) return s.ticketNum;
+        var tn = s.ticketNum;
+        if (tn != null && String(tn).length <= 8) return tn;
         return _tnFallback[s.id] != null ? _tnFallback[s.id] : s.id;
     }
 
