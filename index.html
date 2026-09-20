@@ -460,6 +460,24 @@ function showScanToast(msg, type) {
     setTimeout(function(){ el.classList.remove('show'); setTimeout(function(){ el.remove(); }, 300); }, 3200);
 }
 
+// ===== SOLDE RÉEL ESPÈCES / CB (partagé avec Finances Pro, clé covo_real_balance) =====
+// Chaque vente payée (en tout ou partie) en espèces ou par CB ajoute automatiquement le
+// montant correspondant au solde réel disponible affiché dans Finances Pro.
+var REAL_BALANCE_KEY = 'covo_real_balance';
+function _covoRealBalanceAdjust(bucket, delta, desc) {
+    if ((bucket !== 'especes' && bucket !== 'cb') || !delta) return;
+    var data;
+    try { data = JSON.parse(localStorage.getItem(REAL_BALANCE_KEY)) || {}; } catch(e) { data = {}; }
+    if (typeof data.especes !== 'number') data.especes = 0;
+    if (typeof data.cb !== 'number') data.cb = 0;
+    if (!Array.isArray(data.log)) data.log = [];
+    data[bucket] = parseFloat((data[bucket] + delta).toFixed(2));
+    data.log.unshift({ id: Date.now() + '-' + Math.random().toString(36).slice(2, 8), ts: new Date().toISOString(), bucket: bucket, delta: parseFloat(delta.toFixed(2)), after: data[bucket], desc: desc || '' });
+    if (data.log.length > 300) data.log = data.log.slice(0, 300);
+    localStorage.setItem(REAL_BALANCE_KEY, JSON.stringify(data));
+    if (typeof cpDriveMarkDirty === 'function') cpDriveMarkDirty();
+}
+
 function _covoCurrentUser() {
     try { return JSON.parse(localStorage.getItem('covo_current_user') || 'null'); } catch(e) { return null; }
 }
@@ -1111,6 +1129,10 @@ function cxValidateSale() {
     hist.push(sale);
     localStorage.setItem('covo_sales_history', JSON.stringify(hist));
 
+    // Solde réel espèces/CB : une vente AJOUTE (contrairement à un achat qui déduit)
+    if (sale.receivedCash) _covoRealBalanceAdjust('especes', sale.receivedCash, 'Vente #' + sale.ticketNum);
+    if (sale.receivedCB) _covoRealBalanceAdjust('cb', sale.receivedCB, 'Vente #' + sale.ticketNum);
+
     // Stock
     cxApplyStockChanges(sale.items, saleId);
 
@@ -1508,6 +1530,7 @@ function _cpBuildFullBackupPayload() {
         covo_loyalty: J('covo_loyalty', {customers:[],settings:{}}),
         covo_paie: J('covo_paie', []),
         covo_cagnotte: J('covo_cagnotte', {solde:0,mouvements:[]}),
+        covo_real_balance: J('covo_real_balance', {especes:0,cb:0,log:[]}),
         _version: 20,
         _savedAt: new Date().toISOString()
     };
@@ -1602,7 +1625,7 @@ function _cpApplyRestore(data) {
     if (data.covo_dark_mode != null) localStorage.setItem('covo_dark_mode', data.covo_dark_mode);
     ['covo_retours','covo_marchandise','covo_echeances','covo_rhist','covo_hist','covo_sales','covo_approvisionnements',
      'covo_inv_categories','covo_ech_categories','covo_messages','covo_login_history','covo_quick_links',
-     'covo_caisse_historique','covo_charges_fixes','covo_paiements','covo_dettes','covo_loyalty','covo_paie','covo_cagnotte'
+     'covo_caisse_historique','covo_charges_fixes','covo_paiements','covo_dettes','covo_loyalty','covo_paie','covo_cagnotte','covo_real_balance'
     ].forEach(function(k){ if (data[k] !== undefined) localStorage.setItem(k, JSON.stringify(data[k])); });
     ['covo_aw_panels','covo_modules_config','covo_night_tariff','covo_presence','covo_inv_questions'].forEach(function(k){
         if (data[k] != null) localStorage.setItem(k, typeof data[k] === 'string' ? data[k] : JSON.stringify(data[k]));
