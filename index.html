@@ -205,6 +205,7 @@
         .cx-header-title { font-size:1.1rem; }
     }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
 </head>
 <body>
 
@@ -422,7 +423,10 @@
     <div class="cx-modal-box">
         <div class="cx-modal-header">
             <div class="t">✅ Vente validée</div>
-            <button onclick="document.getElementById('cx-receipt-modal').style.display='none'">✕</button>
+            <div style="display:flex;gap:6px;">
+                <button onclick="cxPrintReceipt()" title="Imprimer le ticket">🖨️</button>
+                <button onclick="document.getElementById('cx-receipt-modal').style.display='none'">✕</button>
+            </div>
         </div>
         <div class="cx-modal-body" id="cx-receipt-body"></div>
     </div>
@@ -433,7 +437,10 @@
     <div class="cx-modal-box">
         <div class="cx-modal-header">
             <div class="t">🧾 Détail du ticket</div>
-            <button onclick="document.getElementById('cx-histdetail-modal').style.display='none'">✕</button>
+            <div style="display:flex;gap:6px;">
+                <button onclick="cxPrintReceipt()" title="Imprimer le ticket">🖨️</button>
+                <button onclick="document.getElementById('cx-histdetail-modal').style.display='none'">✕</button>
+            </div>
         </div>
         <div class="cx-modal-body" id="cx-histdetail-body"></div>
     </div>
@@ -1270,29 +1277,224 @@ function cxApplyEchelSale(clientId, sale, n, firstInstallmentMethod) {
     showScanToast('📅 ' + c.name + ' : ' + n + ' échéances créées · 1ère réglée maintenant (' + parts[0].toFixed(2) + '€) · prochaine le ' + nextDue, 'info');
 }
 
-function cxShowReceipt(sale) {
-    var methodLabel = { cash:'💶 Espèces', cb:'💳 Carte bancaire', ticket:'🎟️ Ticket restaurant', mixed:'💳💶 Mixte', credit:'📒 Crédit (compte client)', echel:'📅 Paiement en plusieurs fois' }[sale.method] || sale.method;
-    var body = document.getElementById('cx-receipt-body');
-    var itemsHtml = sale.items.map(function(item){
-        var qtyDisp = item.unitType === 'kg' ? item.quantity.toFixed(3) + ' kg' : 'x' + item.quantity;
-        return '<div class="cx-receipt-line"><span>' + cxEsc(item.name) + ' (' + qtyDisp + ')</span><span>' + cxLineTotal(item).toFixed(2) + ' €</span></div>';
-    }).join('');
-    var extra = '';
-    if (sale.method === 'cash' || (sale.method === 'mixed' && sale.receivedCash > 0)) {
-        extra += '<div class="cx-receipt-line"><span>Reçu</span><span>' + sale.received.toFixed(2) + ' €</span></div>';
-        extra += '<div class="cx-receipt-line"><span>Monnaie rendue</span><span>' + sale.change.toFixed(2) + ' €</span></div>';
+// ── Configuration ticket (partagée avec COVO Pro via covo_settings.rcpt : nom/adresse/SIRET/
+// tél/email boutique, n° caisse, TVA, mentions légales, message de fin, format papier). Le
+// commerçant n'a donc à renseigner ces informations qu'une seule fois, dans COVO Pro. ──
+function _cxReceiptCfg() {
+    try {
+        var raw = localStorage.getItem('covo_settings');
+        var settings = raw ? JSON.parse(raw) : {};
+        return (settings && settings.rcpt) ? settings.rcpt : {};
+    } catch(e) { return {}; }
+}
+
+// ── En-tête ticket complet : nom/adresse/SIRET/tél/email boutique + n° ticket (cxDisplayTicketNum,
+// toujours sale.id — voir plus bas) + n° caisse + date + caissier. ──
+function _cxReceiptHeaderHTML(sale) {
+    var cfg = _cxReceiptCfg();
+    var shopName = cfg.shopName || 'COVO Pro';
+    var address = cfg.address || '';
+    var siret = cfg.siret || '';
+    var phone = cfg.phone || '';
+    var email = cfg.email || '';
+    var caisseNum = cfg.caisseNum || 'Caisse';
+    var html = '<div style="text-align:center;margin-bottom:10px;">'
+        + '<strong style="font-size:1.15rem;letter-spacing:0.3px;">' + cxEsc(shopName) + '</strong>';
+    if (address) html += '<br><span style="font-size:0.78rem;color:var(--text-muted);">' + cxEsc(address) + '</span>';
+    if (siret) html += '<br><span style="font-size:0.74rem;color:var(--text-muted);">SIRET : ' + cxEsc(siret) + '</span>';
+    if (phone || email) {
+        html += '<br><span style="font-size:0.74rem;color:var(--text-muted);">'
+            + (phone ? '📞 ' + cxEsc(phone) : '')
+            + (phone && email ? '  ' : '')
+            + (email ? '✉️ ' + cxEsc(email) : '')
+            + '</span>';
+    }
+    html += '<div style="border-top:1px dashed var(--border-color);margin:7px 0 5px;"></div>'
+        + '<div style="font-weight:900;font-size:1.05rem;color:#047857;">🧾 Ticket #' + cxEsc(cxDisplayTicketNum(sale)) + '</div>'
+        + '<div style="font-size:0.75rem;color:var(--text-muted);">' + cxEsc(caisseNum) + ' · ' + new Date(sale.date).toLocaleString('fr-FR') + '<br>👤 ' + cxEsc(sale.cashier || '—') + '</div>'
+        + '</div>';
+    return html;
+}
+
+// ── Ligne d'article : nom + quantité/prix unitaire (kg ou unité) + total de ligne ──
+function _cxReceiptItemLine(item) {
+    var isKg = item.unitType === 'kg';
+    var qty = parseFloat(item.quantity) || 0;
+    var price = parseFloat(item.price) || 0;
+    var qtyDisp = isKg
+        ? qty.toFixed(3) + ' kg × ' + price.toFixed(2) + ' €/kg'
+        : 'x' + qty + ' · ' + price.toFixed(2) + ' €/u.';
+    return '<div class="cx-receipt-line"><span>' + cxEsc(item.name)
+        + '<br><span style="font-size:0.72rem;color:var(--text-muted);">' + qtyDisp + '</span></span>'
+        + '<span>' + cxLineTotal(item).toFixed(2) + ' €</span></div>';
+}
+
+// ── Mode de paiement + détail (reçu/rendu en espèces, ventilation CB/espèces/ticket resto pour
+// un règlement mixte, client rattaché pour crédit/échelonné) ──
+function _cxReceiptPaymentHTML(sale) {
+    var methodLabel = { cash:'💶 Espèces', cb:'💳 Carte bancaire', ticket:'🎟️ Ticket restaurant', mixed:'💳💶 Mixte', credit:'📒 Crédit (compte client)', echel:'📅 Paiement en plusieurs fois', points:'🎁 Points fidélité' }[sale.method] || (sale.method || '—');
+    var html = '<div class="cx-receipt-line"><span>Mode de paiement</span><span>' + methodLabel + '</span></div>';
+    if (sale.method === 'cash') {
+        html += '<div class="cx-receipt-line"><span>Reçu</span><span>' + (parseFloat(sale.received)||0).toFixed(2) + ' €</span></div>';
+        html += '<div class="cx-receipt-line"><span>Monnaie rendue</span><span>' + (parseFloat(sale.change)||0).toFixed(2) + ' €</span></div>';
+    } else if (sale.method === 'mixed') {
+        if (sale.receivedCB)     html += '<div class="cx-receipt-line"><span>💳 CB</span><span>' + (parseFloat(sale.receivedCB)||0).toFixed(2) + ' €</span></div>';
+        if (sale.receivedCash)   html += '<div class="cx-receipt-line"><span>💶 Espèces</span><span>' + (parseFloat(sale.receivedCash)||0).toFixed(2) + ' €</span></div>';
+        if (sale.receivedTicket) html += '<div class="cx-receipt-line"><span>🎟️ Ticket resto</span><span>' + (parseFloat(sale.receivedTicket)||0).toFixed(2) + ' €</span></div>';
+        if ((parseFloat(sale.change)||0) > 0.001) html += '<div class="cx-receipt-line"><span>Monnaie rendue</span><span>' + (parseFloat(sale.change)||0).toFixed(2) + ' €</span></div>';
     }
     if ((sale.method === 'credit' || sale.method === 'echel') && sale.clientName) {
-        extra += '<div class="cx-receipt-line"><span>Client</span><span>' + cxEsc(sale.clientName) + '</span></div>';
+        html += '<div class="cx-receipt-line"><span>Client</span><span>' + cxEsc(sale.clientName) + '</span></div>';
     }
+    return html;
+}
+
+// ── Détail TVA incluse, taux globaux configurés dans COVO Pro (Caisse Pro n'affecte pas de taux
+// par article, donc pas de ventilation possible par article ici — seulement sur le total). ──
+function _cxReceiptTvaHTML(total) {
+    var cfg = _cxReceiptCfg();
+    if (!cfg.tvaEnabled) return '';
+    var rates = [];
+    if (cfg.tva20) rates.push(20);
+    if (cfg.tva10) rates.push(10);
+    if (cfg.tva5)  rates.push(5.5);
+    if (cfg.tva0)  rates.push(0);
+    var cv = parseFloat(cfg.tvaCustom);
+    if (!isNaN(cv) && cv > 0 && rates.indexOf(cv) === -1) rates.push(cv);
+    if (!rates.length) return '';
+    var t = parseFloat(total) || 0;
+    var html = '<div style="border-top:1px dashed var(--border-color);margin-top:8px;padding-top:8px;font-size:0.78rem;">'
+        + '<div style="font-weight:700;color:var(--text-muted);margin-bottom:4px;">Détail TVA incluse :</div>';
+    rates.forEach(function(rate){
+        var tvaAmt = rate === 0 ? 0 : (t * rate / (100 + rate));
+        var htAmt = t - tvaAmt;
+        html += '<div style="display:flex;justify-content:space-between;color:var(--text-muted);">'
+            + '<span>TVA ' + rate + ' % (HT : ' + htAmt.toFixed(2) + ' €)</span>'
+            + '<span style="font-weight:700;">' + tvaAmt.toFixed(2) + ' €</span></div>';
+    });
+    html += '</div>';
+    return html;
+}
+
+// ── Mentions légales + message de courtoisie (réglages partagés COVO Pro) ──
+function _cxReceiptFooterHTML() {
+    var cfg = _cxReceiptCfg();
+    var mentions = cfg.mentions || '';
+    var footerMsg = cfg.footerMsg !== undefined ? cfg.footerMsg : 'Merci de votre visite !';
+    var html = '';
+    if (mentions) html += '<div style="border-top:1px dashed var(--border-color);margin-top:10px;padding-top:8px;font-size:0.72rem;color:var(--text-muted);white-space:pre-wrap;">' + cxEsc(mentions) + '</div>';
+    if (footerMsg) html += '<div style="text-align:center;margin-top:12px;font-size:0.85rem;">' + cxEsc(footerMsg) + '</div>';
+    return html;
+}
+
+// ── Bloc code-barres du ticket. svgId/labelId sont paramétrés pour rester distincts entre la
+// modale "vente validée" et la modale "détail historique" — deux éléments avec le même id dans
+// des modales différentes du même document casseraient document.getElementById. ──
+function _cxReceiptBarcodeHTML(svgId, labelId) {
+    return '<div style="text-align:center;margin-top:12px;padding-top:10px;border-top:1px dashed var(--border-color);">'
+        + '<svg id="' + svgId + '" style="max-width:100%;height:auto;display:block;margin:0 auto;"></svg>'
+        + '<div id="' + labelId + '" style="font-size:0.68rem;color:var(--text-muted);margin-top:3px;letter-spacing:0.4px;"></div>'
+        + '</div>';
+}
+
+// Dessine le code-barres une fois le HTML inséré dans le DOM (JsBarcode a besoin des éléments
+// réels). Applique d'emblée le correctif viewBox (même bug que celui corrigé dans fidelite_pro.html
+// pour la carte fidélité) : JsBarcode fixe des attributs width/height en pixels mais ne pose
+// jamais de viewBox, donc sans ce correctif le CSS responsive ROGNERAIT le dessin au lieu de le
+// mettre à l'échelle dès que le conteneur est plus étroit que la largeur dessinée.
+function _cxRenderReceiptBarcode(sale, svgId, labelId) {
+    try {
+        var svg = document.getElementById(svgId);
+        var label = document.getElementById(labelId);
+        var code = String(cxDisplayTicketNum(sale));
+        if (label) label.textContent = 'N° ' + code;
+        if (svg && typeof JsBarcode !== 'undefined') {
+            JsBarcode(svg, code, { format:'CODE128', width:1.6, height:44, displayValue:false, margin:2, lineColor:'#000' });
+            var bbox = svg.getBBox();
+            if (bbox && bbox.width > 0 && bbox.height > 0) {
+                svg.setAttribute('viewBox', '0 0 ' + bbox.width + ' ' + bbox.height);
+                svg.removeAttribute('width');
+                svg.removeAttribute('height');
+            }
+        }
+    } catch(e) {}
+}
+
+// Dernier ticket affiché (reçu de vente ou détail historique) — utilisé par cxPrintReceipt() pour
+// savoir quoi imprimer sans avoir à ré-interroger le DOM ou le localStorage.
+var _cxLastReceiptSale = null;
+
+function cxShowReceipt(sale) {
+    _cxLastReceiptSale = sale;
+    var body = document.getElementById('cx-receipt-body');
+    var itemsHtml = sale.items.map(_cxReceiptItemLine).join('');
     body.innerHTML =
-        '<div style="text-align:center;font-weight:900;font-size:1.1rem;color:#047857;">Ticket #' + cxEsc(sale.ticketNum) + '</div>'
-        + '<div style="text-align:center;font-size:0.75rem;color:var(--text-muted);">' + new Date(sale.date).toLocaleString('fr-FR') + ' · ' + cxEsc(sale.cashier) + '</div>'
-        + '<div style="margin-top:8px;">' + itemsHtml + '</div>'
+        _cxReceiptHeaderHTML(sale)
+        + '<div style="border-top:1px dashed var(--border-color);padding-top:8px;">' + itemsHtml + '</div>'
         + '<div class="cx-receipt-total"><span>Total</span><span>' + sale.total.toFixed(2) + ' €</span></div>'
-        + '<div class="cx-receipt-line"><span>Mode de paiement</span><span>' + methodLabel + '</span></div>'
-        + extra;
+        + _cxReceiptPaymentHTML(sale)
+        + _cxReceiptTvaHTML(sale.total)
+        + _cxReceiptFooterHTML()
+        + _cxReceiptBarcodeHTML('cx-receipt-barcode-svg', 'cx-receipt-barcode-label');
     document.getElementById('cx-receipt-modal').style.display = 'flex';
+    _cxRenderReceiptBarcode(sale, 'cx-receipt-barcode-svg', 'cx-receipt-barcode-label');
+}
+
+// ── Impression du ticket (reçu de vente ou détail historique, cf. _cxLastReceiptSale) dans une
+// fenêtre dédiée, mise en forme selon le format papier configuré (58mm/80mm/A4) — même approche
+// que printReceipt() dans covo_pro_v28_credit.html, pour un rendu cohérent dans toute la suite. ──
+function cxPrintReceipt() {
+    var sale = _cxLastReceiptSale;
+    if (!sale) { showScanToast('⚠️ Aucun ticket à imprimer', 'warning'); return; }
+    var cfg = _cxReceiptCfg();
+    var paper = cfg.paperWidth || '58';
+    var pageCss, bodyCss, bcW, bcH;
+    if (paper === '80') {
+        pageCss = '@page{size:80mm auto;margin:0;}';
+        bodyCss = 'width:76mm;margin:0 auto;padding:2mm 3mm 6mm;font-size:13px;line-height:1.4;';
+        bcW = 2.0; bcH = 55;
+    } else if (paper === 'a4') {
+        pageCss = '@page{size:A4;margin:12mm;}';
+        bodyCss = 'max-width:320px;margin:0 auto;padding:4px;font-size:13px;line-height:1.4;';
+        bcW = 1.8; bcH = 50;
+    } else {
+        pageCss = '@page{size:58mm auto;margin:0;}';
+        bodyCss = 'width:58mm;padding:2mm 2mm 5mm;font-size:11px;line-height:1.3;';
+        bcW = 1.4; bcH = 38;
+    }
+    var code = String(cxDisplayTicketNum(sale));
+    var itemsHtml = (sale.items || []).map(_cxReceiptItemLine).join('');
+    var content =
+        _cxReceiptHeaderHTML(sale)
+        + '<div style="border-top:1px dashed #000;padding-top:8px;">' + itemsHtml + '</div>'
+        + '<div class="cx-receipt-total"><span>Total</span><span>' + (parseFloat(sale.total)||0).toFixed(2) + ' €</span></div>'
+        + _cxReceiptPaymentHTML(sale)
+        + _cxReceiptTvaHTML(sale.total)
+        + _cxReceiptFooterHTML()
+        + '<div style="text-align:center;margin-top:12px;padding-top:10px;border-top:1px dashed #000;">'
+        + '<svg id="cx-print-barcode-svg" style="max-width:100%;"></svg>'
+        + '<div style="font-size:0.72rem;color:#777;margin-top:3px;letter-spacing:0.4px;">N° ' + code + '</div>'
+        + '</div>';
+    var printWindow = window.open('', '_blank');
+    if (!printWindow) { showScanToast('⚠️ Autorisez les popups pour imprimer', 'warning'); return; }
+    printWindow.document.write(
+        '<!DOCTYPE html><html><head><title>Ticket de caisse</title><style>'
+        + pageCss
+        + 'html,body{margin:0;}body{font-family:\'Courier New\',monospace;color:#000;' + bodyCss + '-webkit-print-color-adjust:exact;print-color-adjust:exact;}'
+        + 'body *{color:#000 !important;}'
+        + 'body [style*="dashed"]{border-color:#000 !important;}'
+        + 'strong,b{font-weight:700;}svg{max-width:100%;}'
+        + '.cx-receipt-line{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px dashed #000;font-size:0.85em;}'
+        + '.cx-receipt-total{display:flex;justify-content:space-between;font-weight:900;padding:6px 0;font-size:1.05em;}'
+        + '</style></head><body>' + content + '</body>'
+        + '<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"><\/script>'
+        + '<script>'
+        + 'try{var svg=document.getElementById("cx-print-barcode-svg");if(svg&&typeof JsBarcode!=="undefined"){JsBarcode(svg,' + JSON.stringify(code) + ',{format:"CODE128",width:' + bcW + ',height:' + bcH + ',displayValue:false,margin:2,lineColor:"#000"});var bb=svg.getBBox();if(bb&&bb.width>0&&bb.height>0){svg.setAttribute("viewBox","0 0 "+bb.width+" "+bb.height);svg.removeAttribute("width");svg.removeAttribute("height");}}}catch(e){}'
+        + '<\/script>'
+        + '</html>'
+    );
+    printWindow.document.close();
+    setTimeout(function(){ printWindow.print(); }, 300);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1306,7 +1508,10 @@ function cxShowReceipt(sale) {
 // code-barres, précisément « pour correspondre à l'affichage de l'historique » (voir
 // showReceipt/_ticketNum dans covo_pro_v28_credit.html). Pour que le même ticket porte partout
 // le même numéro (et reste recherchable d'une app à l'autre), Caisse Pro doit donc afficher
-// sale.id ici aussi, sans jamais le raccourcir ni le remplacer par ticketNum.
+// sale.id ici aussi, sans jamais le raccourcir ni le remplacer par ticketNum. Depuis l'ajout du
+// ticket de caisse complet (en-tête boutique, TVA, code-barres, impression), cxShowReceipt et
+// cxPrintReceipt s'alignent eux aussi sur cette fonction (via _cxReceiptHeaderHTML) — le ticket
+// montré au client à la caisse porte donc désormais le même numéro que partout ailleurs.
 // Fonction déclarée au niveau global (et non imbriquée dans cxRenderHistory) car elle est aussi
 // appelée depuis cxShowHistoryTicketDetail() lors du clic sur une ligne de l'historique.
 function cxDisplayTicketNum(s) {
@@ -1393,18 +1598,10 @@ function cxShowHistoryTicketDetail(saleId) {
     var s = hist.find(function(x){ return x.id === saleId; });
     var body = document.getElementById('cx-histdetail-body');
     if (!s || !body) { showScanToast('⚠️ Ticket introuvable', 'error'); return; }
+    _cxLastReceiptSale = s;
 
-    var methodLabel = { cash:'💶 Espèces', cb:'💳 Carte bancaire', mixed:'💳💶 Mixte', ticket:'🎟️ Ticket restaurant', credit:'📒 Crédit (compte client)', echel:'📅 Paiement en plusieurs fois', points:'🎁 Points fidélité' }[s.method] || (s.method || '—');
-    var itemsHtml = (Array.isArray(s.items) ? s.items : []).map(function(it){
-        var qtyDisp = it.unitType === 'kg' ? (it.quantity||0).toFixed(3) + ' kg' : 'x' + (it.quantity||1);
-        return '<div class="cx-receipt-line"><span>' + cxEsc(it.name) + ' (' + qtyDisp + ')</span><span>' + cxLineTotal(it).toFixed(2) + ' €</span></div>';
-    }).join('') || '<div class="cx-receipt-line"><span style="color:var(--text-muted);">Détail non disponible</span></div>';
-
-    var extra = '';
-    if (s.method === 'cash' || (s.method === 'mixed' && s.receivedCash > 0)) {
-        extra += '<div class="cx-receipt-line"><span>Reçu</span><span>' + (parseFloat(s.received)||0).toFixed(2) + ' €</span></div>';
-        extra += '<div class="cx-receipt-line"><span>Monnaie rendue</span><span>' + (parseFloat(s.change)||0).toFixed(2) + ' €</span></div>';
-    }
+    var itemsHtml = (Array.isArray(s.items) ? s.items : []).map(_cxReceiptItemLine).join('')
+        || '<div class="cx-receipt-line"><span style="color:var(--text-muted);">Détail non disponible</span></div>';
 
     var clientBlock = '';
     if (s.method === 'credit' && s.creditCustomerName) {
@@ -1418,14 +1615,16 @@ function cxShowHistoryTicketDetail(saleId) {
 
     body.innerHTML =
         cancelledBanner
-        + '<div style="text-align:center;font-weight:900;font-size:1.1rem;color:#047857;">🧾 Ticket #' + cxEsc(cxDisplayTicketNum(s)) + '</div>'
-        + '<div style="text-align:center;font-size:0.75rem;color:var(--text-muted);">' + new Date(s.date).toLocaleString('fr-FR') + ' · ' + cxEsc(s.cashier || '—') + '</div>'
-        + '<div style="margin-top:10px;">' + itemsHtml + '</div>'
+        + _cxReceiptHeaderHTML(s)
+        + '<div style="border-top:1px dashed var(--border-color);padding-top:8px;">' + itemsHtml + '</div>'
         + '<div class="cx-receipt-total"><span>Total</span><span>' + (parseFloat(s.total)||0).toFixed(2) + ' €</span></div>'
-        + '<div class="cx-receipt-line"><span>Mode de paiement</span><span>' + methodLabel + '</span></div>'
-        + extra
-        + clientBlock;
+        + _cxReceiptPaymentHTML(s)
+        + clientBlock
+        + _cxReceiptTvaHTML(s.total)
+        + _cxReceiptFooterHTML()
+        + _cxReceiptBarcodeHTML('cx-histdetail-barcode-svg', 'cx-histdetail-barcode-label');
     document.getElementById('cx-histdetail-modal').style.display = 'flex';
+    _cxRenderReceiptBarcode(s, 'cx-histdetail-barcode-svg', 'cx-histdetail-barcode-label');
 }
 
 // ═══════════════════════════════════════════════════════════════════════
