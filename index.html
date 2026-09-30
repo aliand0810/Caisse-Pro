@@ -320,6 +320,7 @@
         <div id="cx-client-picker" style="display:none;">
             <div class="cx-client-picker-box">
                 <label style="font-size:0.72rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;">Client fidélité</label>
+                <div id="cx-client-picker-hint" style="font-size:0.7rem;color:var(--text-muted);margin-top:2px;">💡 Optionnel — pour créditer les points fidélité du client</div>
                 <input type="text" id="cx-client-search" class="cx-input" style="width:100%;margin-top:6px;" placeholder="🔍 Nom, téléphone ou code-barres…" oninput="cxClientSearchInput()">
                 <div id="cx-client-results" class="cx-client-results" style="display:none;"></div>
                 <label style="font-size:0.68rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;margin-top:10px;display:block;">🎫 Ou saisie manuelle du n° de carte</label>
@@ -835,8 +836,18 @@ function cxSelectPayMethod(method) {
     document.getElementById('cx-pay-ticket-inputs').style.display = method === 'ticket' ? '' : 'none';
     document.getElementById('cx-pay-credit-inputs').style.display = method === 'credit' ? '' : 'none';
     document.getElementById('cx-pay-echel-inputs').style.display = method === 'echel' ? '' : 'none';
+    // Le sélecteur de client fidélité reste visible quel que soit le mode de règlement : sur un
+    // achat standard (CB/espèces/mixte/ticket resto) il reste OPTIONNEL (permet de créditer les
+    // points et d'envoyer le récapitulatif WhatsApp), et devient OBLIGATOIRE uniquement pour un
+    // crédit ou un paiement échelonné (cf. cxValidateSale, qui bloque sans client dans ces deux cas).
     var picker = document.getElementById('cx-client-picker');
-    if (picker) picker.style.display = (method === 'credit' || method === 'echel') ? '' : 'none';
+    if (picker) picker.style.display = '';
+    var hint = document.getElementById('cx-client-picker-hint');
+    if (hint) {
+        hint.textContent = (method === 'credit' || method === 'echel')
+            ? '🔒 Obligatoire pour ce mode de règlement'
+            : '💡 Optionnel — pour créditer les points fidélité du client';
+    }
     if (method === 'echel') cxEchelRefresh();
     cxComputeChange();
 }
@@ -931,7 +942,7 @@ function cxRenderPickedClient() {
     box.style.display = '';
     box.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">'
         + '<div><div style="font-weight:800;">👤 ' + cxEsc(c.name || '—') + '</div>'
-        + '<div style="font-size:0.72rem;color:var(--text-muted);">Solde dû ' + (+(c.credit||0)).toFixed(2) + '€'
+        + '<div style="font-size:0.72rem;color:var(--text-muted);">⭐ ' + (c.points||0) + ' pts · Solde dû ' + (+(c.credit||0)).toFixed(2) + '€'
         + (c.creditLimit ? ' / Plafond ' + (+c.creditLimit).toFixed(2) + '€' : '') + '</div></div>'
         + '<button type="button" class="cx-cl-remove" onclick="cxClearPickedClient()">✕</button>'
         + '</div>';
@@ -1107,7 +1118,12 @@ function cxValidateSale() {
     var total = cxCartTotal();
     var method = cxPayMethod;
     var received = 0, receivedCash = 0, receivedCB = 0, receivedTicket = 0, change = 0;
-    var pickedClient = null;
+    // Client fidélité éventuellement rattaché (recherche, saisie manuelle de carte ou scan) : lu
+    // ICI, pour TOUS les modes de règlement — auparavant seuls 'credit'/'echel' le lisaient, ce qui
+    // empêchait d'attacher une carte fidélité (points, vérification titulaire, récap WhatsApp) sur
+    // un achat standard CB/espèces/mixte/ticket resto alors même que le sélecteur de client (voir
+    // cxSelectPayMethod) permet désormais de le choisir quel que soit le mode.
+    var pickedClient = cxGetPickedClient();
 
     if (method === 'cash') {
         received = parseFloat(document.getElementById('cx-amount-received').value);
@@ -1125,7 +1141,6 @@ function cxValidateSale() {
         received = total;
         change = 0;
     } else if (method === 'credit') {
-        pickedClient = cxGetPickedClient();
         if (!pickedClient) { showScanToast('⚠️ Sélectionnez un client', 'info'); return; }
         var lim = +((pickedClient.creditLimit) || 0);
         var due = +((pickedClient.credit) || 0);
@@ -1135,7 +1150,6 @@ function cxValidateSale() {
         }
         received = 0; receivedCash = 0; receivedCB = 0; change = 0;
     } else if (method === 'echel') {
-        pickedClient = cxGetPickedClient();
         if (!pickedClient) { showScanToast('⚠️ Sélectionnez un client', 'info'); return; }
         received = 0; receivedCash = 0; receivedCB = 0; change = 0;
     } else {
@@ -1193,7 +1207,9 @@ function _cxFinalizeSale(args) {
     // Stock
     cxApplyStockChanges(sale.items, saleId);
 
-    // Écriture compte client (crédit / échéancier)
+    // Écriture compte client (crédit / échéancier), ou crédit des points fidélité sur un achat
+    // standard (CB/espèces/mixte/ticket resto) avec carte rattachée — pas d'effet sur le compte
+    // crédit dans ce dernier cas, juste un cumul de points (voir cxApplyLoyaltyPoints).
     if (method === 'credit') {
         cxApplyCreditSale(pickedClient.id, sale);
     } else if (method === 'echel') {
@@ -1201,6 +1217,8 @@ function _cxFinalizeSale(args) {
         var firstMethodEl = document.getElementById('cx-echel-method');
         var firstMethod = (firstMethodEl && firstMethodEl.value) || 'cash';
         cxApplyEchelSale(pickedClient.id, sale, n, firstMethod);
+    } else if (pickedClient) {
+        cxApplyLoyaltyPoints(pickedClient.id, sale);
     }
 
     cxShowReceipt(sale);
@@ -1223,7 +1241,48 @@ function _cxFinalizeSale(args) {
     cxRenderProducts();
     cxRenderHistory();
     cpDriveMarkDirty();
-    showScanToast('✅ Vente #' + sale.ticketNum + ' validée', 'success');
+    showScanToast('✅ Vente #' + cxDisplayTicketNum(sale) + ' validée' + (sale.loyaltyPointsEarned ? (' · +' + sale.loyaltyPointsEarned + ' pts') : ''), 'success');
+}
+
+// ── Crédit des points fidélité sur un achat standard (CB/espèces/mixte/ticket resto) avec carte
+// rattachée — pas de crédit/échéancier ici, juste un cumul de points. Même formule et même forme
+// d'historique que le hook showReceipt de covo_pro_v28_credit.html (Math.floor(total*ppe),
+// type:'credit' + items[], pour rester reconnu par l'onglet "Achats" de fidelite_pro.html — à ne
+// pas confondre avec le type 'credit_purchase' utilisé par cxApplyCreditSale pour une VRAIE vente
+// à crédit). Pose aussi loyaltyCustomerName/loyaltyPointsEarned sur le ticket lui-même dans
+// covo_sales_history (mêmes noms de champs que ceux posés par COVO Pro), pour que le badge et le
+// détail archivé dans l'Historique de Caisse Pro les retrouvent.
+function cxApplyLoyaltyPoints(clientId, sale) {
+    var loyalty = cxLoyalty();
+    var idx = loyalty.customers.findIndex(function(x){ return x.id === clientId; });
+    if (idx === -1) return;
+    var c = loyalty.customers[idx];
+    var ppe = parseFloat((loyalty.settings||{}).pointsPerEuro); if (isNaN(ppe)) ppe = 1;
+    var earned = Math.floor((sale.total||0) * ppe);
+    c.points = (c.points||0) + earned;
+    c.totalSpent = +(((c.totalSpent||0) + (sale.total||0))).toFixed(2);
+    if (!c.history) c.history = [];
+    c.history.unshift({
+        date: sale.date, saleId: sale.id, ticketNum: sale.id, amount: sale.total, method: sale.method || '',
+        points: earned, type: 'credit', cashier: sale.cashier || '',
+        items: (sale.items||[]).map(function(it){ return { name: it.name||'', quantity: it.quantity||1, unitType: it.unitType||'unit', price: it.price||0, total: +(((it.quantity||1)*(it.price||0)).toFixed(2)) }; })
+    });
+    c.history = c.history.slice(0, 300);
+    localStorage.setItem('covo_loyalty', JSON.stringify(loyalty));
+
+    sale.loyaltyCustomerName = c.name;
+    sale.loyaltyPointsEarned = earned;
+    // sale a déjà été poussé dans covo_sales_history par _cxFinalizeSale avant cet appel — on
+    // corrige l'entrée en place (même approche que COVO Pro pour le même besoin).
+    try {
+        var hist = JSON.parse(localStorage.getItem('covo_sales_history') || '[]');
+        var hi = hist.findIndex(function(s){ return s.id === sale.id; });
+        if (hi !== -1) {
+            hist[hi].loyaltyCustomerName = c.name;
+            hist[hi].loyaltyPointsEarned = earned;
+            localStorage.setItem('covo_sales_history', JSON.stringify(hist));
+        }
+    } catch(e) {}
 }
 
 // ── Écritures compte client fidélité (crédit / échelonné) ────────────────
@@ -2154,10 +2213,18 @@ window._cxSendLoyaltyRecapWA=function(client, sale){
     return '• '+(it.name||'')+' ('+qte+') — '+lt.toFixed(2)+'€';
   }).join('\n');
   var soldeLabel = sale.method==='credit' ? ('Solde dû : '+(+(fresh.credit||0)).toFixed(2)+'€') : (sale.method==='echel' ? 'Paiement en plusieurs fois activé' : '');
+  // Achat standard (CB/espèces/mixte/ticket resto) avec carte rattachée : pas de solde dû ni
+  // d'échéancier, mais des points gagnés (cxApplyLoyaltyPoints) — affichés comme dans COVO Pro.
+  var ptsLabel = (sale.loyaltyPointsEarned != null) ? ('⭐ Points gagnés : +'+sale.loyaltyPointsEarned+' pts · Solde disponible : '+(fresh.points||0)+' pts') : '';
   var msg='Bonjour '+(fresh.name||client.name||'')+", merci pour votre achat chez COVO !\n\n"
-    +'🧾 Ticket #'+(sale.ticketNum||sale.id)+'\n'+lignes+'\n\n'
+    // N° de ticket TOUJOURS cxDisplayTicketNum (= sale.id) — jamais sale.ticketNum, pour porter le
+    // même numéro que celui imprimé/affiché sur le ticket (cf. cxDisplayTicketNum plus bas dans ce
+    // fichier) ; sale.ticketNum peut différer dès que covo_settings.rcpt.ticketCounter est réglé,
+    // ce qui faisait auparavant afficher ICI un numéro différent de celui du ticket réel.
+    +'🧾 Ticket #'+cxDisplayTicketNum(sale)+'\n'+lignes+'\n\n'
     +'💰 Total : '+(sale.total||0).toFixed(2)+'€'
-    +(soldeLabel?('\n📒 '+soldeLabel):'');
+    +(soldeLabel?('\n📒 '+soldeLabel):'')
+    +(ptsLabel?('\n'+ptsLabel):'');
   try{
     window.open('https://wa.me/'+ph+'?text='+encodeURIComponent(msg),'_blank');
     showScanToast('📲 Récapitulatif envoyé par WhatsApp à '+(fresh.name||client.name||'le client'), 'success');
