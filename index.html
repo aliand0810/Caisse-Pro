@@ -1105,6 +1105,23 @@ function cxValidateSale() {
         change = 0;
     }
 
+    var _cxSaleArgs = { method: method, pickedClient: pickedClient, total: total, received: received, receivedCash: receivedCash, receivedCB: receivedCB, receivedTicket: receivedTicket, change: change };
+
+    // Carte fidélité utilisée (vente à crédit / échéancier) : vérification d'identité
+    // du titulaire avant toute validation (voir module en fin de fichier).
+    if (pickedClient && typeof window._cxOwnerCheckStart === 'function') {
+        window._cxOwnerCheckStart(pickedClient, function(){ _cxFinalizeSale(_cxSaleArgs); });
+        return;
+    }
+    _cxFinalizeSale(_cxSaleArgs);
+}
+
+// ── Finalisation de la vente (après vérification titulaire éventuelle) ──────
+function _cxFinalizeSale(args) {
+    var method = args.method, pickedClient = args.pickedClient, total = args.total,
+        received = args.received, receivedCash = args.receivedCash, receivedCB = args.receivedCB,
+        receivedTicket = args.receivedTicket, change = args.change;
+
     var saleId = Date.now();
     var sale = {
         id: saleId,
@@ -1147,6 +1164,11 @@ function cxValidateSale() {
     }
 
     cxShowReceipt(sale);
+
+    // Récapitulatif WhatsApp au client fidélité (si une carte a été utilisée)
+    if (pickedClient && typeof window._cxSendLoyaltyRecapWA === 'function') {
+        window._cxSendLoyaltyRecapWA(pickedClient, sale);
+    }
 
     cart = [];
     cxUpdateCartBadge();
@@ -1733,6 +1755,189 @@ window.cpMaybeShowInstallBanner = function(){
     if (savedClientId) { setTimeout(function(){ cpDriveConnect({ silent: true }); }, 1200); }
 
     setTimeout(cxFocusBarcode, 50);
+})();
+</script>
+
+<!-- ════════════════════════════════════════════════════════════
+     MODULE SÉCURITÉ VENTE FIDÉLITÉ : confirmation WhatsApp du
+     récapitulatif + vérification d'identité si l'acheteur n'est
+     pas le titulaire de la carte — Caisse Pro
+     ════════════════════════════════════════════════════════════ -->
+<style>
+#cx-owner-modal,#cx-idcheck-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);backdrop-filter:blur(8px);z-index:9999;justify-content:center;align-items:center;padding:16px;}
+#cx-owner-box,#cx-idcheck-box{background:var(--bg-card,#fff);border-radius:18px;width:100%;max-width:420px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.35);}
+body.dark-mode #cx-owner-box, body.dark-mode #cx-idcheck-box{background:var(--bg-card,#1e293b);}
+.cx-sec-fld{width:100%;box-sizing:border-box;padding:12px 14px;border:1.5px solid var(--border-color,#e0e0e0);border-radius:10px;font-size:1.1rem;letter-spacing:4px;text-align:center;font-weight:900;background:var(--input-bg,#fff);color:var(--text-main);font-family:inherit;}
+.cx-sec-fld:focus{outline:none;border-color:#8b5cf6;box-shadow:0 0 0 3px rgba(139,92,246,.15);}
+</style>
+<div id="cx-owner-modal">
+  <div id="cx-owner-box">
+    <div style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);padding:18px 20px;color:#fff;">
+      <div style="font-size:1.05rem;font-weight:900;">🎁 Vérification titulaire</div>
+    </div>
+    <div style="padding:20px;">
+      <div style="font-size:.88rem;color:var(--text-main);margin-bottom:4px;">Client : <strong id="cx-owner-name"></strong></div>
+      <div style="font-size:.8rem;color:var(--text-muted);margin-bottom:18px;">Confirmez l'identité de l'acheteur avant de valider la vente.</div>
+      <button type="button" onclick="window._cxOwnerAnswer(true)" style="width:100%;padding:13px;background:linear-gradient(135deg,#10b981,#059669);color:#fff;border:none;border-radius:10px;font-weight:900;font-size:.92rem;cursor:pointer;margin-bottom:10px;">✅ Oui, c'est le/la titulaire</button>
+      <button type="button" onclick="window._cxOwnerAnswer(false)" style="width:100%;padding:13px;background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;border:none;border-radius:10px;font-weight:900;font-size:.92rem;cursor:pointer;">🚫 Non, ce n'est pas le/la titulaire</button>
+    </div>
+  </div>
+</div>
+<div id="cx-idcheck-modal">
+  <div id="cx-idcheck-box">
+    <div style="background:linear-gradient(135deg,#f59e0b,#d97706);padding:18px 20px;color:#fff;display:flex;align-items:center;justify-content:space-between;">
+      <div style="font-size:1.02rem;font-weight:900;">🔐 Code de confirmation</div>
+      <button type="button" onclick="window._cxIdCheckCancel()" style="background:rgba(255,255,255,.2);border:none;color:#fff;font-size:1.1rem;width:30px;height:30px;border-radius:8px;cursor:pointer;">✕</button>
+    </div>
+    <div style="padding:20px;">
+      <div id="cx-idcheck-intro" style="font-size:.82rem;color:var(--text-main);margin-bottom:14px;line-height:1.5;"></div>
+      <div id="cx-idcheck-nophone" style="display:none;font-size:.82rem;color:#dc2626;font-weight:700;margin-bottom:14px;"></div>
+      <button type="button" id="cx-idcheck-sendbtn" onclick="window._cxIdCheckSend()" style="width:100%;padding:12px;background:linear-gradient(135deg,#25D366,#128C7E);color:#fff;border:none;border-radius:10px;font-weight:900;font-size:.88rem;cursor:pointer;margin-bottom:14px;">📲 Envoyer le code par WhatsApp</button>
+      <div id="cx-idcheck-entry" style="display:none;">
+        <label style="font-size:.74rem;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;">Code communiqué par le titulaire</label>
+        <input id="cx-idcheck-code" class="cx-sec-fld" maxlength="4" inputmode="numeric" placeholder="••••" style="margin-top:6px;margin-bottom:10px;">
+        <div id="cx-idcheck-err" style="display:none;color:#dc2626;font-size:.78rem;font-weight:700;margin-bottom:10px;"></div>
+        <button type="button" onclick="window._cxIdCheckVerify()" style="width:100%;padding:12px;background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;border:none;border-radius:10px;font-weight:900;font-size:.88rem;cursor:pointer;margin-bottom:8px;">✔ Valider le code</button>
+        <button type="button" onclick="window._cxIdCheckSend()" style="width:100%;padding:8px;background:transparent;color:var(--text-muted);border:none;font-size:.76rem;cursor:pointer;text-decoration:underline;">🔁 Renvoyer un nouveau code</button>
+      </div>
+      <div id="cx-idcheck-admin" style="display:none;margin-top:12px;border-top:1px solid var(--border-color,#eee);padding-top:12px;">
+        <button type="button" onclick="window._cxIdCheckAdminOverride()" style="width:100%;padding:10px;background:rgba(0,0,0,.06);color:var(--text-main);border:none;border-radius:9px;font-weight:700;font-size:.78rem;cursor:pointer;">🔓 Forcer la validation (admin)</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+'use strict';
+function _cxDigits(s){ return String(s||'').replace(/\D/g,''); }
+function _cxWaNormPhone(phone,cc){
+  var d=_cxDigits(phone); if(!d)return '';
+  cc=_cxDigits(cc)||'33';
+  if(d.indexOf('00')===0)d=d.slice(2);
+  if(d.charAt(0)==='0')d=cc+d.slice(1);
+  else if(d.indexOf(cc)!==0 && d.length<=9)d=cc+d;
+  return d;
+}
+
+var _pendingProceed=null;
+var _verifyCode=null; // {code, customerId, expiresAt}
+
+window._cxOwnerCheckStart=function(client, proceedCb){
+  _pendingProceed=proceedCb;
+  window._cxIdCheckClient=client;
+  var nm=document.getElementById('cx-owner-name'); if(nm)nm.textContent=client.name||'';
+  var m=document.getElementById('cx-owner-modal'); if(m)m.style.display='flex';
+};
+
+window._cxOwnerAnswer=function(isOwner){
+  var m=document.getElementById('cx-owner-modal'); if(m)m.style.display='none';
+  if(isOwner){
+    var cb=_pendingProceed; _pendingProceed=null;
+    if(typeof cb==='function')cb();
+  } else {
+    window._cxIdCheckOpen();
+  }
+};
+
+window._cxIdCheckOpen=function(){
+  var cu=window._cxIdCheckClient;
+  document.getElementById('cx-idcheck-entry').style.display='none';
+  document.getElementById('cx-idcheck-err').style.display='none';
+  document.getElementById('cx-idcheck-code').value='';
+  var hasPhone=!!(cu && cu.phone && _cxDigits(cu.phone).length>=6);
+  var nophoneEl=document.getElementById('cx-idcheck-nophone');
+  var sendBtn=document.getElementById('cx-idcheck-sendbtn');
+  var adminBox=document.getElementById('cx-idcheck-admin');
+  if(hasPhone){
+    nophoneEl.style.display='none';
+    sendBtn.style.display='';
+    document.getElementById('cx-idcheck-intro').textContent='Un code de confirmation va être envoyé par WhatsApp au titulaire ('+(cu.name||'')+') pour autoriser cet achat par un tiers.';
+    adminBox.style.display='none';
+  } else {
+    nophoneEl.textContent="⚠️ Ce client n'a aucun numéro de téléphone enregistré — impossible d'envoyer un code de vérification.";
+    nophoneEl.style.display='';
+    sendBtn.style.display='none';
+    document.getElementById('cx-idcheck-intro').textContent='';
+    adminBox.style.display=(typeof cpIsAdmin==='function' && cpIsAdmin())?'':'none';
+  }
+  var m=document.getElementById('cx-idcheck-modal'); if(m)m.style.display='flex';
+};
+
+window._cxIdCheckCancel=function(){
+  var m=document.getElementById('cx-idcheck-modal'); if(m)m.style.display='none';
+  _verifyCode=null;
+  _pendingProceed=null;
+  showScanToast('🚫 Vente non validée — identité non confirmée', 'info');
+};
+
+window._cxIdCheckSend=function(){
+  var cu=window._cxIdCheckClient; if(!cu)return;
+  var ph=_cxWaNormPhone(cu.phone,'33');
+  if(!ph){showScanToast('⚠️ Numéro invalide','error');return;}
+  var code=String(Math.floor(1000+Math.random()*9000));
+  _verifyCode={code:code,customerId:cu.id,expiresAt:Date.now()+10*60*1000};
+  var msg="Bonjour "+(cu.name||'')+", une personne tente d'effectuer un achat avec votre carte fidélité COVO en votre absence. Code de confirmation : "+code+" (valable 10 minutes). Si vous n'êtes pas à l'origine de cette demande, ignorez ce message et prévenez le magasin.";
+  try{ window.open('https://wa.me/'+ph+'?text='+encodeURIComponent(msg),'_blank'); }catch(e){}
+  document.getElementById('cx-idcheck-entry').style.display='';
+  document.getElementById('cx-idcheck-err').style.display='none';
+  document.getElementById('cx-idcheck-code').value='';
+  setTimeout(function(){var i=document.getElementById('cx-idcheck-code');if(i)i.focus();},60);
+  showScanToast('📲 Code envoyé — demandez-le au titulaire', 'info');
+};
+
+window._cxIdCheckVerify=function(){
+  var v=_verifyCode;
+  var entered=(document.getElementById('cx-idcheck-code').value||'').trim();
+  var errEl=document.getElementById('cx-idcheck-err');
+  if(!v){errEl.textContent='Aucun code envoyé — cliquez sur "Envoyer le code".';errEl.style.display='';return;}
+  if(Date.now()>v.expiresAt){errEl.textContent='⏱️ Code expiré — renvoyez un nouveau code.';errEl.style.display='';return;}
+  if(!entered||entered!==v.code){errEl.textContent='❌ Code incorrect.';errEl.style.display='';return;}
+  _verifyCode=null;
+  var m=document.getElementById('cx-idcheck-modal'); if(m)m.style.display='none';
+  showScanToast('✅ Identité confirmée', 'success');
+  var cb=_pendingProceed; _pendingProceed=null;
+  if(typeof cb==='function')cb();
+};
+
+window._cxIdCheckAdminOverride=function(){
+  if(!(typeof cpIsAdmin==='function' && cpIsAdmin())){showScanToast('🚫 Réservé aux administrateurs','error');return;}
+  _verifyCode=null;
+  var m=document.getElementById('cx-idcheck-modal'); if(m)m.style.display='none';
+  showScanToast('🔓 Validation forcée par un administrateur', 'info');
+  var cb=_pendingProceed; _pendingProceed=null;
+  if(typeof cb==='function')cb();
+};
+
+/* Récapitulatif WhatsApp envoyé au client après une vente avec carte fidélité */
+window._cxSendLoyaltyRecapWA=function(client, sale){
+  if(!client || client.noWhatsapp)return;
+  var fresh = client;
+  try{ if(typeof cxLoyalty==='function'){ var f=cxLoyalty().customers.find(function(c){return c.id===client.id;}); if(f)fresh=f; } }catch(e){}
+  if(fresh.noWhatsapp)return;
+  var ph=_cxWaNormPhone(fresh.phone||client.phone,'33');
+  if(!ph)return;
+  var lignes=(sale.items||[]).map(function(it){
+    var qte=it.unitType==='kg'?(parseFloat(it.quantity).toFixed(3)+' kg'):('x'+it.quantity);
+    var lt=(it.unitType==='kg'?parseFloat(it.quantity):it.quantity)*(it.price||0);
+    return '• '+(it.name||'')+' ('+qte+') — '+lt.toFixed(2)+'€';
+  }).join('\n');
+  var soldeLabel = sale.method==='credit' ? ('Solde dû : '+(+(fresh.credit||0)).toFixed(2)+'€') : (sale.method==='echel' ? 'Paiement en plusieurs fois activé' : '');
+  var msg='Bonjour '+(fresh.name||client.name||'')+", merci pour votre achat chez COVO !\n\n"
+    +'🧾 Ticket #'+(sale.ticketNum||sale.id)+'\n'+lignes+'\n\n'
+    +'💰 Total : '+(sale.total||0).toFixed(2)+'€'
+    +(soldeLabel?('\n📒 '+soldeLabel):'');
+  try{
+    window.open('https://wa.me/'+ph+'?text='+encodeURIComponent(msg),'_blank');
+    showScanToast('📲 Récapitulatif envoyé par WhatsApp à '+(fresh.name||client.name||'le client'), 'success');
+  }catch(e){}
+};
+
+/* Fermer la fenêtre de code en cliquant sur le fond (pas celle du titulaire, qui exige une réponse explicite) */
+setTimeout(function(){
+  var m2=document.getElementById('cx-idcheck-modal');
+  if(m2)m2.addEventListener('click',function(e){if(e.target===this)window._cxIdCheckCancel();});
+},500);
+
 })();
 </script>
 </body>
