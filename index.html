@@ -321,6 +321,12 @@
                 <label style="font-size:0.72rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;">Client fidélité</label>
                 <input type="text" id="cx-client-search" class="cx-input" style="width:100%;margin-top:6px;" placeholder="🔍 Nom, téléphone ou code-barres…" oninput="cxClientSearchInput()">
                 <div id="cx-client-results" class="cx-client-results" style="display:none;"></div>
+                <label style="font-size:0.68rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;margin-top:10px;display:block;">🎫 Ou saisie manuelle du n° de carte</label>
+                <div style="display:flex;gap:6px;align-items:center;margin-top:6px;">
+                    <input type="text" id="cx-client-cardcode" class="cx-input" style="flex:1;" placeholder="Ex. LCLT0001…" onkeydown="if(event.key==='Enter'){event.preventDefault();cxPickClientByCode();}">
+                    <button type="button" onclick="cxPickClientByCode()" style="flex-shrink:0;padding:9px 16px;background:var(--primary,#2c6fad);color:#fff;border:none;border-radius:8px;font-weight:800;font-size:0.82rem;cursor:pointer;">Valider</button>
+                </div>
+                <div id="cx-client-cardcode-err" style="display:none;color:#dc2626;font-size:0.72rem;font-weight:700;margin-top:4px;"></div>
                 <div id="cx-client-selected" class="cx-client-selected" style="display:none;"></div>
             </div>
         </div>
@@ -881,6 +887,33 @@ function cxClearPickedClient() {
     cxPickedClientId = null;
     cxRenderPickedClient();
     cxComputeChange();
+}
+
+// ── Sélection manuelle par n° de carte fidélité (saisie clavier ou scanner) ──
+// Même logique de correspondance que COVO Pro (LCLT<id> en repli si aucun
+// barcode explicite n'a été attribué au client) : comparaison EXACTE, pas une
+// recherche floue par sous-chaîne comme cxClientSearchInput().
+function cxPickClientByCode() {
+    var input = document.getElementById('cx-client-cardcode');
+    var errEl = document.getElementById('cx-client-cardcode-err');
+    if (!input) return;
+    var raw = (input.value || '').trim();
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+    if (!raw) return;
+    var code = raw.toUpperCase();
+    var loyalty = cxLoyalty();
+    var c = (loyalty.customers || []).find(function(x) {
+        var bc = x.barcode || ('LCLT' + String(x.id).replace('CLT-', ''));
+        return String(bc).toUpperCase() === code;
+    });
+    if (!c) {
+        if (errEl) { errEl.textContent = '⚠️ Aucun client avec ce numéro de carte'; errEl.style.display = ''; }
+        showScanToast('⚠️ Carte fidélité non reconnue : ' + raw, 'error');
+        return;
+    }
+    cxPickClient(c.id);
+    input.value = '';
+    showScanToast('👤 ' + c.name + ' sélectionné(e)', 'success');
 }
 
 function cxRenderPickedClient() {
