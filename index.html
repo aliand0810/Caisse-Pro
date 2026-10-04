@@ -424,6 +424,10 @@
     .cx-client-result { padding:8px 10px; cursor:pointer; border-bottom:1px solid var(--border-color); text-align:left; }
     .cx-client-result:last-child { border-bottom:none; }
     .cx-client-result:hover { background:var(--bg-card-2); }
+    .cx-resv-tag { display:inline-block; margin-top:3px; font-size:0.66rem; font-weight:800; color:#047857; background:rgba(5,150,105,0.12); padding:1px 7px; border-radius:8px; }
+    .cx-resv-sum { margin-top:8px; padding-top:8px; border-top:1px dashed rgba(5,150,105,0.35); font-size:0.74rem; line-height:1.5; }
+    .cx-resv-sum .ok { color:#047857; font-weight:800; }
+    .cx-resv-sum .wait { color:#b45309; font-weight:700; }
     .cx-client-selected { margin-top:8px; background:rgba(5,150,105,0.1); border:1.5px solid rgba(5,150,105,0.4); border-radius:10px; padding:10px 12px; text-align:left; }
 
     .cx-cart-line { display:flex; align-items:center; gap:10px; background:var(--bg-card); border:1.5px solid var(--border-color); border-radius:10px; padding:10px 12px; margin-bottom:8px; }
@@ -972,9 +976,9 @@ function cxAddToCart(id) {
         return;
     }
 
-    var existing = cart.find(function(c){ return c.id === p.id && c.unitType !== 'kg'; });
+    var existing = cart.find(function(c){ return c.id === p.id && c.unitType !== 'kg' && !c._resv; });
+    if (cxStockNeed(p.id) + 1 > stock + 1e-9) { showScanToast('⚠️ Stock insuffisant pour ' + p.name, 'info'); return; }
     if (existing) {
-        if (existing.quantity + 1 > stock) { showScanToast('⚠️ Stock insuffisant pour ' + p.name, 'info'); return; }
         existing.quantity += 1;
     } else {
         cart.push({ id: p.id, name: p.name, price: parseFloat(p.price) || 0, quantity: 1, unitType: 'unit' });
@@ -1006,9 +1010,8 @@ function cxConfirmKgAdd() {
     var qty = parseFloat(document.getElementById('cx-kg-qty').value);
     if (!qty || qty <= 0) { showScanToast('⚠️ Saisissez un poids valide', 'info'); return; }
     var stock = parseFloat(p.stock) || 0;
-    var existing = cart.find(function(c){ return c.id === p.id && c.unitType === 'kg'; });
-    var already = existing ? existing.quantity : 0;
-    if (already + qty > stock + 1e-9) { showScanToast('⚠️ Stock insuffisant (' + stock.toFixed(3) + ' kg dispo)', 'info'); return; }
+    var existing = cart.find(function(c){ return c.id === p.id && c.unitType === 'kg' && !c._resv; });
+    if (cxStockNeed(p.id) + qty > stock + 1e-9) { showScanToast('⚠️ Stock insuffisant (' + stock.toFixed(3) + ' kg dispo)', 'info'); return; }
     if (existing) {
         existing.quantity = parseFloat((existing.quantity + qty).toFixed(3));
     } else {
@@ -1025,6 +1028,15 @@ function cxConfirmKgAdd() {
 // ═══════════════════════════════════════════════════════════════════════
 // PANIER
 // ═══════════════════════════════════════════════════════════════════════
+// Quantité de stock LIBRE nécessaire pour un article dans le panier : les quantités d'une
+// réservation déjà mise de côté (stock décompté à la réservation) ne comptent pas.
+function cxStockNeed(productId) {
+    return cart.reduce(function(s, l){
+        if (String(l.id) !== String(productId)) return s;
+        return s + Math.max(0, (parseFloat(l.quantity) || 0) - (parseFloat(l._resvHeldQty) || 0));
+    }, 0);
+}
+
 function cxLineTotal(item) {
     return parseFloat(((item.price || 0) * (item.quantity || 0)).toFixed(2));
 }
@@ -1060,7 +1072,7 @@ function cxChangeQty(idx, delta) {
     var step = item.unitType === 'kg' ? 0.1 : 1;
     var next = parseFloat((item.quantity + delta * step).toFixed(3));
     if (next <= 0) { cxRemoveFromCart(idx); return; }
-    if (next > stock) { showScanToast('⚠️ Stock insuffisant', 'info'); return; }
+    if (delta > 0 && cxStockNeed(item.id) + (next - item.quantity) > stock + 1e-9) { showScanToast('⚠️ Stock insuffisant', 'info'); return; }
     item.quantity = next;
     cxRenderCart();
     cxRenderProducts();
@@ -1095,7 +1107,8 @@ function cxRenderCart() {
             var qtyDisp = item.unitType === 'kg' ? item.quantity.toFixed(3) + ' kg' : item.quantity;
             var priceDisp = item.unitType === 'kg' ? (item.price.toFixed(2) + ' €/kg') : (item.price.toFixed(2) + ' €/u.');
             return '<div class="cx-cart-line">'
-                + '<div class="cx-cl-name"><div class="n">' + cxEsc(item.name) + '</div><div class="p">' + priceDisp + '</div></div>'
+                + '<div class="cx-cl-name"><div class="n">' + cxEsc(item.name) + '</div><div class="p">' + priceDisp + '</div>'
+                + (item._resv ? '<div class="cx-resv-tag">📦 Réservé · ' + cxEsc(item._resvClientName || 'client') + '</div>' : '') + '</div>'
                 + '<div class="cx-qty-ctrl">'
                 +   '<button onclick="cxChangeQty(' + idx + ',-1)">−</button>'
                 +   '<span>' + qtyDisp + '</span>'
@@ -1231,7 +1244,8 @@ function cxRenderPickedClient() {
         + '<div style="font-size:0.72rem;color:var(--text-muted);">⭐ ' + (c.points||0) + ' pts · Solde dû ' + (+(c.credit||0)).toFixed(2) + '€'
         + (c.creditLimit ? ' / Plafond ' + (+c.creditLimit).toFixed(2) + '€' : '') + '</div></div>'
         + '<button type="button" class="cx-cl-remove" onclick="cxClearPickedClient()">✕</button>'
-        + '</div>';
+        + '</div>'
+        + (typeof cxResvSummaryHtml === 'function' ? cxResvSummaryHtml(c) : '');
 }
 
 // ── Paiement en plusieurs fois (échelonné) ───────────────────────────────
@@ -1374,10 +1388,13 @@ function cxApplyStockChanges(saleCart, saleId) {
         var p = allProducts[idx];
         var before = parseFloat(p.stock) || 0;
         var after;
+        // Réservation client mise de côté : son stock a déjà été décompté à la réservation
+        var _held = (item._resv && typeof cxResvSplit === 'function') ? cxResvSplit(item).heldQty : 0;
+        var _out = Math.max(0, (parseFloat(item.quantity) || 0) - _held);
         if (item.unitType === 'kg') {
-            after = parseFloat((before - item.quantity).toFixed(3));
+            after = parseFloat((before - _out).toFixed(3));
         } else {
-            after = before - item.quantity;
+            after = before - _out;
         }
         p.stock = after;
         if (!Array.isArray(p.stockHistory)) p.stockHistory = [];
@@ -1386,8 +1403,8 @@ function cxApplyStockChanges(saleCart, saleId) {
             type: 'sale',
             before: before,
             after: after,
-            delta: -item.quantity,
-            reason: 'Vente',
+            delta: -_out,
+            reason: _held ? 'Vente (dont réservation mise de côté : ' + _held + ')' : 'Vente',
             user: userName,
             meta: { saleId: saleId }
         });
@@ -1507,6 +1524,12 @@ function _cxFinalizeSale(args) {
         cxApplyLoyaltyPoints(pickedClient.id, sale);
     }
 
+    // Réservations remises au client avec cette vente → retirées de sa fiche (comme COVO Pro)
+    if (typeof cxResvCompleteSale === 'function') {
+        var _nResv = cxResvCompleteSale(sale);
+        if (_nResv) sale.resvPicked = _nResv;
+    }
+
     cxShowReceipt(sale);
 
     // Récapitulatif WhatsApp au client fidélité (si une carte a été utilisée)
@@ -1527,7 +1550,8 @@ function _cxFinalizeSale(args) {
     cxRenderProducts();
     cxRenderHistory();
     cpDriveMarkDirty();
-    showScanToast('✅ Vente #' + cxDisplayTicketNum(sale) + ' validée' + (sale.loyaltyPointsEarned ? (' · +' + sale.loyaltyPointsEarned + ' pts') : ''), 'success');
+    showScanToast('✅ Vente #' + cxDisplayTicketNum(sale) + ' validée' + (sale.loyaltyPointsEarned ? (' · +' + sale.loyaltyPointsEarned + ' pts') : '')
+        + (sale.resvPicked ? (' · 📦 ' + sale.resvPicked + ' réservation' + (sale.resvPicked > 1 ? 's' : '') + ' remise' + (sale.resvPicked > 1 ? 's' : '')) : ''), 'success');
 }
 
 // ── Crédit des points fidélité sur un achat standard (CB/espèces/mixte/ticket resto) avec carte
@@ -2683,6 +2707,141 @@ setTimeout(function(){
   if(m2)m2.addEventListener('click',function(e){if(e.target===this)window._cxIdCheckCancel();});
 },500);
 
+})();
+</script>
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   RÉSERVATIONS CLIENTS → PANIER (même comportement que COVO Pro)
+   Dès qu'un client fidélité est identifié (recherche par nom / téléphone, ou n° de
+   carte saisi / scanné), ses articles réservés DISPONIBLES sont ajoutés au panier
+   (ligne « 📦 Réservé · Nom »). Les réservations encore en attente de stock sont
+   signalées. Changer / retirer le client retire ses lignes réservées.
+   À la validation : le stock déjà mis de côté n'est pas décompté une 2e fois, et
+   les réservations remises sont retirées de la fiche du client (Fidélité Pro,
+   COVO Pro et portail client sont mis à jour automatiquement).
+   ═══════════════════════════════════════════════════════════════════════════ */
+function cxResvHeld(r) { return !!r && r.decremented !== false; }   // mis de côté (stock déjà décompté)
+
+// Réservations disponibles / en attente d'un client, en tenant compte du stock libre restant
+function cxResvAvailableFor(c) {
+    var out = { avail: [], waiting: [] };
+    var res = ((c && c.reservations) || []).filter(function(r){ return r && r.id != null && r.status !== 'cancelled'; });
+    var free = {};
+    function stockOf(pid) {
+        if (!(pid in free)) { var p = cxFindProduct(pid); free[pid] = p ? (parseFloat(p.stock) || 0) - cxStockNeed(pid) : 0; }
+        return free[pid];
+    }
+    res.slice().sort(function(a, b){ return String(a.date || '').localeCompare(String(b.date || '')); }).forEach(function(r){
+        var p = cxFindProduct(r.productId), q = parseFloat(r.qty) || 0;
+        if (!p || q <= 0) { out.waiting.push({ r: r, p: p }); return; }
+        if (cxResvHeld(r)) { out.avail.push({ r: r, p: p }); return; }
+        var pid = String(p.id), s = stockOf(pid);
+        if (s + 1e-9 >= q) { free[pid] = s - q; out.avail.push({ r: r, p: p }); }
+        else out.waiting.push({ r: r, p: p });
+    });
+    return out;
+}
+function cxResvIdsInCart() {
+    var m = {};
+    cart.forEach(function(l){ (l._resvAlloc || []).forEach(function(a){ m[String(a.id)] = 1; }); });
+    return m;
+}
+function cxResvAddForClient(c) {
+    var info = cxResvAvailableFor(c), inCart = cxResvIdsInCart(), added = 0;
+    info.avail.forEach(function(x){
+        var r = x.r, p = x.p;
+        if (inCart[String(r.id)]) return;
+        var q = parseFloat(r.qty) || 0;
+        var isKg = p.unitType === 'kg' || r.unitType === 'kg';
+        var line = cart.find(function(l){ return l._resv && String(l._resvClientId) === String(c.id) && String(l.id) === String(p.id); });
+        if (!line) {
+            line = { id: p.id, name: p.name + ' 📦', price: parseFloat(isKg ? p.pricePerKg : p.price) || 0, quantity: 0,
+                     unitType: isKg ? 'kg' : 'unit', _resv: true, _resvClientId: c.id, _resvClientName: c.name || '',
+                     _resvAlloc: [], _resvHeldQty: 0 };
+            cart.push(line);
+        }
+        line.quantity = isKg ? parseFloat((line.quantity + q).toFixed(3)) : line.quantity + q;
+        line._resvAlloc.push({ id: r.id, qty: q, held: cxResvHeld(r) });
+        if (cxResvHeld(r)) line._resvHeldQty = parseFloat((line._resvHeldQty + q).toFixed(3));
+        added++;
+    });
+    // (les réservations déjà dans le panier ne sont pas « en attente »)
+    return { added: added, waiting: info.waiting.filter(function(x){ return !inCart[String(x.r.id)]; }) };
+}
+function cxResvRemoveForClient(clientId) {
+    var n = cart.length;
+    cart = cart.filter(function(l){ return !(l._resv && String(l._resvClientId) === String(clientId)); });
+    return n - cart.length;
+}
+// À la vente : réservations servies dans l'ordre jusqu'à la quantité réellement vendue
+function cxResvSplit(item) {
+    var sold = parseFloat(item.quantity) || 0, acc = 0, held = 0, done = [];
+    (item._resvAlloc || []).forEach(function(a){
+        if (acc + a.qty <= sold + 1e-9) { acc += a.qty; done.push(a.id); if (a.held) held += a.qty; }
+    });
+    return { done: done, heldQty: parseFloat(held.toFixed(3)) };
+}
+function cxResvCompleteSale(sale) {
+    var ids = {};
+    (sale.items || []).forEach(function(it){ if (it && it._resv) cxResvSplit(it).done.forEach(function(id){ ids[String(id)] = 1; }); });
+    if (!Object.keys(ids).length) return 0;
+    var loyalty = cxLoyalty(), n = 0;
+    (loyalty.customers || []).forEach(function(c){
+        if (!c.reservations || !c.reservations.length) return;
+        var keep = [];
+        c.reservations.forEach(function(r){ if (r && ids[String(r.id)]) n++; else keep.push(r); });
+        c.reservations = keep;
+    });
+    if (n) {
+        localStorage.setItem('covo_loyalty', JSON.stringify(loyalty));
+        if (typeof cpDriveMarkDirty === 'function') cpDriveMarkDirty();
+    }
+    return n;
+}
+function cxResvSummaryHtml(c) {
+    if (!c) return '';
+    var inCart = 0;
+    cart.forEach(function(l){ if (l._resv && String(l._resvClientId) === String(c.id)) inCart += (l._resvAlloc || []).length; });
+    var waiting = cxResvAvailableFor(c).waiting.filter(function(x){ return !cxResvIdsInCart()[String(x.r.id)]; });
+    if (!inCart && !waiting.length) return '';
+    var h = '<div class="cx-resv-sum">';
+    if (inCart) h += '<div class="ok">📦 ' + inCart + ' réservation' + (inCart > 1 ? 's' : '') + ' disponible' + (inCart > 1 ? 's' : '') + ' ajoutée' + (inCart > 1 ? 's' : '') + ' au panier</div>';
+    if (waiting.length) h += '<div class="wait">⏳ En attente de stock : ' + waiting.map(function(x){
+        var q = x.r.unitType === 'kg' ? (x.r.qty + ' kg') : ('×' + (x.r.qty || 1));
+        return cxEsc((x.p && x.p.name) || x.r.productName || 'Article') + ' ' + q;
+    }).join(', ') + '</div>';
+    return h + '</div>';
+}
+function cxResvRefreshUi() {
+    cxRenderCart();
+    cxRenderProducts();
+    cxUpdateCartBadge();
+    cxRenderPickedClient();
+}
+(function(){
+    var _pick = window.cxPickClient, _clear = window.cxClearPickedClient;
+    if (typeof _pick !== 'function' || typeof _clear !== 'function') return;
+    window.cxPickClient = function(id) {
+        var prev = cxPickedClientId;
+        var removed = (prev != null && String(prev) !== String(id)) ? cxResvRemoveForClient(prev) : 0;
+        _pick.apply(this, arguments);
+        var c = cxGetPickedClient();
+        if (!c) { if (removed) cxResvRefreshUi(); return; }
+        cxLoadProducts(); // stock à jour (une autre app a pu vendre / réapprovisionner)
+        var r = cxResvAddForClient(c);
+        cxResvRefreshUi();
+        if (r.added) {
+            showScanToast('📦 ' + r.added + ' article' + (r.added > 1 ? 's' : '') + ' réservé' + (r.added > 1 ? 's' : '') + ' par ' + (c.name || 'le client') + ' ajouté' + (r.added > 1 ? 's' : '') + ' au panier', 'success');
+        } else if (r.waiting.length) {
+            showScanToast('⏳ ' + (c.name || 'Client') + ' : ' + r.waiting.length + ' réservation' + (r.waiting.length > 1 ? 's' : '') + ' en attente de stock', 'info');
+        }
+    };
+    window.cxClearPickedClient = function() {
+        var prev = cxPickedClientId;
+        var removed = prev != null ? cxResvRemoveForClient(prev) : 0;
+        _clear.apply(this, arguments);
+        if (removed) { cxResvRefreshUi(); showScanToast('📦 Articles réservés retirés du panier', 'info'); }
+    };
 })();
 </script>
 </body>
