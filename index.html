@@ -1662,11 +1662,38 @@ function cxApplyEchelSale(clientId, sale, n, firstInstallmentMethod) {
 // ── Configuration ticket (partagée avec COVO Pro via covo_settings.rcpt : nom/adresse/SIRET/
 // tél/email boutique, n° caisse, TVA, mentions légales, message de fin, format papier). Le
 // commerçant n'a donc à renseigner ces informations qu'une seule fois, dans COVO Pro. ──
+// Texte technique qui n'a rien à faire sur un ticket client (identifiant Google Drive « …apps.googleusercontent.com »,
+// clé d'API, jeton…) — arrive dans « Message de bas de ticket » par un collage ou un remplissage automatique du navigateur.
+function _cxIsTechKey(s) {
+    s = String(s == null ? '' : s).trim();
+    if (!s) return false;
+    var cid = ''; try { cid = (localStorage.getItem('gdrive_client_id') || '').trim(); } catch(e) {}
+    return /apps\.googleusercontent\.com/i.test(s)
+        || /\bAIza[0-9A-Za-z_\-]{20,}/.test(s)
+        || /\bya29\.[0-9A-Za-z_\-]{10,}/.test(s)
+        || (cid.length > 10 && s.indexOf(cid) >= 0);
+}
+function _cxCleanRcptText(s) {
+    if (!_cxIsTechKey(s)) return s;
+    // Retire les lignes techniques, garde le reste (ex. mentions légales sur plusieurs lignes)
+    return String(s).split(/\r?\n/).filter(function(l) { return !_cxIsTechKey(l); }).join('\n').trim();
+}
 function _cxReceiptCfg() {
     try {
         var raw = localStorage.getItem('covo_settings');
         var settings = raw ? JSON.parse(raw) : {};
-        return (settings && settings.rcpt) ? settings.rcpt : {};
+        var rcpt = (settings && settings.rcpt) ? settings.rcpt : {};
+        var changed = false;
+        ['shopName','address','siret','phone','email','caisseNum','mentions','footerMsg'].forEach(function(k) {
+            if (typeof rcpt[k] === 'string' && _cxIsTechKey(rcpt[k])) {
+                var c = _cxCleanRcptText(rcpt[k]);
+                rcpt[k] = (k === 'footerMsg' && !c) ? 'Merci de votre visite !' : c;
+                changed = true;
+            }
+        });
+        // Réglage partagé (COVO Pro, Admin Pro) : on le corrige une fois pour toutes
+        if (changed) { try { settings.rcpt = rcpt; localStorage.setItem('covo_settings', JSON.stringify(settings)); if (typeof cpDriveMarkDirty === 'function') cpDriveMarkDirty(); } catch(e) {} }
+        return rcpt;
     } catch(e) { return {}; }
 }
 
