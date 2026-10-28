@@ -4455,5 +4455,150 @@ function cxResvRefreshUi() {
     window._cpaAnomaly = anomaly;      // diagnostic
 })();
 </script>
+<script>
+/* ════════════════════════════════════════════════════════════════════════
+   CAISSE PRO — PROMOTIONS FIDÉLITÉ (créées dans COVO Pro → Catalogue → 🎁 Promos fidélité)
+   • Client fidélité choisi au paiement (recherche, n° de carte ou scan) → le prix
+     fidélité s'applique aux unités encore disponibles (product.fidPromo)
+   • Au-delà de la quantité restante : le surplus reste au prix normal
+   • Vente validée → compteur « vendus » mis à jour dans covo_products (COVO Pro
+     le reprend et met à jour l'annonce du site web)
+   ════════════════════════════════════════════════════════════════════════ */
+(function () {
+    'use strict';
+    if (window._cxFidInstalled) return;
+    window._cxFidInstalled = true;
+    function $(id) { return document.getElementById(id); }
+    function eur(n) { return (+n || 0).toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'; }
+    function qtyTxt(n, kg) { return kg ? (Math.round(n * 1000) / 1000).toLocaleString('fr-FR') + ' kg' : String(Math.round(n * 1000) / 1000).replace('.', ','); }
+    function toast(m, t) { if (typeof showScanToast === 'function') showScanToast(m, t || 'success'); }
+    function today() { var d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+    function remaining(fp) { return Math.max(0, Math.round(((+fp.qty || 0) - (+fp.sold || 0)) * 1000) / 1000); }
+    function state(fp) {
+        if (!fp) return 'none';
+        if (fp.on === false) return 'pause';
+        var t = today();
+        if (fp.end && t > fp.end) return 'end';
+        if (remaining(fp) <= 0) return 'out';
+        if (fp.start && t < fp.start) return 'soon';
+        return 'on';
+    }
+    function prod(id) {
+        try { if (typeof products !== 'undefined' && Array.isArray(products)) { for (var i = 0; i < products.length; i++) if (String(products[i].id) === String(id)) return products[i]; } } catch (e) {}
+        return null;
+    }
+    function active(p) { return !!(p && p.fidPromo && p.active !== false && state(p.fidPromo) === 'on'); }
+    function client() { try { return typeof cxGetPickedClient === 'function' ? cxGetPickedClient() : null; } catch (e) { return null; } }
+    function cartArr() { try { if (typeof cart !== 'undefined' && Array.isArray(cart)) return cart; } catch (e) {} return null; }
+
+    function apply() {
+        var C = cartArr(); if (!C) return;
+        var cu = client();
+        C.forEach(function (item) {
+            var p = prod(item.id), fp = p && p.fidPromo;
+            var ok = !!(cu && active(p) && !item._resv);
+            if (ok && !item._fid && !(+fp.price < (+item.price || 0) - 0.0001)) ok = false;
+            if (!ok) {
+                if (item._fid) { item.price = item._fid.base; item.name = String(item.name || '').replace(/ 🎁$/, ''); delete item._fid; }
+                return;
+            }
+            if (!item._fid) item._fid = { base: item.price };
+            var base = item._fid.base, q = +item.quantity || 0, n = Math.min(q, remaining(fp)), pr = +fp.price;
+            item.price = q > 0 ? (n >= q ? pr : Math.round((n * pr + (q - n) * base) / q * 10000) / 10000) : pr;
+            item._fid.n = n; item._fid.q = q; item._fid.promo = pr;
+            if (!/ 🎁$/.test(String(item.name || ''))) item.name = String(item.name || '') + ' 🎁';
+        });
+    }
+    window._cxFidApply = apply;
+
+    function decorate() {
+        var C = cartArr(), box = $('cx-cart-lines'); if (!C || !box) return;
+        var cu = client(), kids = box.children;
+        C.forEach(function (item, i) {
+            var el = kids[i]; if (!el || el.querySelector('.cxf-ln')) return;
+            var p = prod(item.id), d = document.createElement('div'); d.className = 'cxf-ln';
+            d.style.cssText = 'font-size:.7rem;font-weight:800;margin-top:3px;padding:3px 7px;border-radius:7px;line-height:1.35;';
+            if (item._fid && item._fid.n > 0) {
+                var f = item._fid, kg = item.unitType === 'kg';
+                d.style.background = 'rgba(219,39,119,.12)'; d.style.color = '#be185d';
+                d.innerHTML = '🎁 Promo fidélité : ' + qtyTxt(f.n, kg) + (kg ? '' : ' ×') + ' ' + eur(f.promo) + (kg ? '/kg' : '') + ' au lieu de ' + eur(f.base) + ' · économie ' + eur((f.base - f.promo) * f.n)
+                    + (f.q > f.n ? '<br><span style="color:#b45309;">⚠️ Plus que ' + qtyTxt(f.n, kg) + ' en promo : ' + qtyTxt(f.q - f.n, kg) + ' au prix normal</span>' : '');
+            } else if (!cu && active(p) && !item._resv && +p.fidPromo.price < (+item.price || 0)) {
+                d.style.border = '1px dashed rgba(219,39,119,.45)'; d.style.color = '#9d174d';
+                d.innerHTML = '🎁 Promo fidélité ' + eur(p.fidPromo.price) + (p.unitType === 'kg' ? '/kg' : '') + ' : sélectionnez la carte fidélité du client au paiement';
+            } else return;
+            var host = el.querySelector('.cx-cl-name') || el;
+            host.appendChild(d);
+        });
+        var tot = $('cx-cart-total');
+        if (tot) {
+            var eco = 0; C.forEach(function (it) { if (it._fid && it._fid.n > 0) eco += (it._fid.base - it._fid.promo) * it._fid.n; });
+            var b = $('cxf-eco');
+            if (eco > 0.004) {
+                if (!b) { b = document.createElement('div'); b.id = 'cxf-eco'; b.style.cssText = 'font-size:.74rem;font-weight:800;color:#be185d;margin-top:3px;'; tot.parentNode.insertBefore(b, tot.nextSibling); }
+                b.textContent = '🎁 Économie fidélité : ' + eur(eco);
+            } else if (b) b.remove();
+        }
+    }
+
+    function boot() {
+        if (typeof window.cxCartTotal !== 'function' || typeof window.cxRenderCart !== 'function' || typeof window._cxFinalizeSale !== 'function' || typeof window.cxPickClient !== 'function') {
+            if ((boot.n = (boot.n || 0) + 1) < 100) setTimeout(boot, 300); return;
+        }
+        var ct = window.cxCartTotal;
+        window.cxCartTotal = function () { try { apply(); } catch (e) {} return ct.apply(this, arguments); };
+        try { cxCartTotal = window.cxCartTotal; } catch (e) {}
+        var rc = window.cxRenderCart;
+        window.cxRenderCart = function () { try { apply(); } catch (e) {} var r = rc.apply(this, arguments); try { decorate(); } catch (e) {} return r; };
+        try { cxRenderCart = window.cxRenderCart; } catch (e) {}
+        var pk = window.cxPickClient;
+        window.cxPickClient = function () {
+            var r = pk.apply(this, arguments);
+            try {
+                window.cxRenderCart();
+                var C = cartArr() || [], n = C.filter(function (it) { return it._fid && it._fid.n > 0; }).length;
+                if (n) toast('🎁 Promo fidélité appliquée sur ' + n + ' article' + (n > 1 ? 's' : ''));
+            } catch (e) {}
+            return r;
+        };
+        try { cxPickClient = window.cxPickClient; } catch (e) {}
+        var cl = window.cxClearPickedClient;
+        if (typeof cl === 'function') {
+            window.cxClearPickedClient = function () { var r = cl.apply(this, arguments); try { window.cxRenderCart(); } catch (e) {} return r; };
+            try { cxClearPickedClient = window.cxClearPickedClient; } catch (e) {}
+        }
+        var fin = window._cxFinalizeSale;
+        window._cxFinalizeSale = function (args) {
+            var C0 = cartArr(), snap = [], cu = (args && args.pickedClient) || client();
+            try { apply(); } catch (e) {}
+            if (C0) C0.forEach(function (it) { if (it._fid && it._fid.n > 0) snap.push({ id: it.id, n: it._fid.n }); });
+            var r = fin.apply(this, arguments);
+            if (snap.length && cartArr() !== C0) {
+                try {
+                    var all = JSON.parse(localStorage.getItem('covo_products') || '[]') || [], msg = [];
+                    snap.forEach(function (s) {
+                        var p = all.find(function (x) { return String(x.id) === String(s.id); }); if (!p || !p.fidPromo) return;
+                        var fp = p.fidPromo;
+                        fp.sold = Math.round(((+fp.sold || 0) + s.n) * 1000) / 1000;
+                        if (!Array.isArray(fp.log)) fp.log = [];
+                        fp.log.unshift({ at: new Date().toISOString(), n: s.n, client: cu ? (cu.name || '') : '', cid: cu ? cu.id : null, src: 'Caisse Pro' });
+                        if (fp.log.length > 300) fp.log.length = 300;
+                        if (remaining(fp) <= 0 && !fp.outAt) fp.outAt = new Date().toISOString();
+                        msg.push(p.name + ' : ' + (remaining(fp) > 0 ? 'reste ' + qtyTxt(remaining(fp), p.unitType === 'kg') : 'offre épuisée'));
+                    });
+                    localStorage.setItem('covo_products', JSON.stringify(all));
+                    if (typeof cxLoadProducts === 'function') cxLoadProducts();
+                    if (typeof cpDriveMarkDirty === 'function') cpDriveMarkDirty();
+                    if (typeof cxRenderProducts === 'function') cxRenderProducts();
+                    if (msg.length) setTimeout(function () { toast('🎁 Promo fidélité — ' + msg.join(' · '), 'info'); }, 900);
+                } catch (e) { console.warn('[Promo fidélité]', e); }
+            }
+            return r;
+        };
+        try { _cxFinalizeSale = window._cxFinalizeSale; } catch (e) {}
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
+})();
+</script>
 </body>
 </html>
