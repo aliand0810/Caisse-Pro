@@ -4473,7 +4473,17 @@ function cxResvRefreshUi() {
     function qtyTxt(n, kg) { return kg ? (Math.round(n * 1000) / 1000).toLocaleString('fr-FR') + ' kg' : String(Math.round(n * 1000) / 1000).replace('.', ','); }
     function toast(m, t) { if (typeof showScanToast === 'function') showScanToast(m, t || 'success'); }
     function today() { var d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
-    function remaining(fp) { return Math.max(0, Math.round(((+fp.qty || 0) - (+fp.sold || 0)) * 1000) / 1000); }
+    /* promo « par client » : quota personnel (ex. 24 boissons à 1 € pour chaque client choisi), puis prix normal */
+    function isCli(fp) { return !!(fp && fp.mode === 'client'); }
+    function inList(fp, cid) { return cid != null && (fp.clients || []).some(function (x) { return String(x) === String(cid); }); }
+    function usedBy(fp, cid) { return +(((fp.used || {})[String(cid)]) || 0); }
+    function cliLeft(fp, cid) { if (!inList(fp, cid)) return 0; return Math.max(0, Math.round(((+fp.perClient || 0) - usedBy(fp, cid)) * 1000) / 1000); }
+    function firstName(c) { return String((c && c.name) || '').trim().split(/\s+/)[0] || ''; }
+    function remaining(fp) {
+        if (isCli(fp)) { var t = 0; (fp.clients || []).forEach(function (id) { t += Math.max(0, (+fp.perClient || 0) - usedBy(fp, id)); }); return Math.round(t * 1000) / 1000; }
+        return Math.max(0, Math.round(((+fp.qty || 0) - (+fp.sold || 0)) * 1000) / 1000);
+    }
+    function quotaFor(fp, cu) { return isCli(fp) ? (cu ? cliLeft(fp, cu.id) : 0) : remaining(fp); }
     function state(fp) {
         if (!fp) return 'none';
         if (fp.on === false) return 'pause';
@@ -4488,6 +4498,7 @@ function cxResvRefreshUi() {
         return null;
     }
     function active(p) { return !!(p && p.fidPromo && p.active !== false && state(p.fidPromo) === 'on'); }
+    function cxEscF(t) { return String(t == null ? '' : t).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
     function client() { try { return typeof cxGetPickedClient === 'function' ? cxGetPickedClient() : null; } catch (e) { return null; } }
     function cartArr() { try { if (typeof cart !== 'undefined' && Array.isArray(cart)) return cart; } catch (e) {} return null; }
 
@@ -4496,16 +4507,16 @@ function cxResvRefreshUi() {
         var cu = client();
         C.forEach(function (item) {
             var p = prod(item.id), fp = p && p.fidPromo;
-            var ok = !!(cu && active(p) && !item._resv);
+            var ok = !!(cu && active(p) && !item._resv && quotaFor(fp, cu) > 0);
             if (ok && !item._fid && !(+fp.price < (+item.price || 0) - 0.0001)) ok = false;
             if (!ok) {
                 if (item._fid) { item.price = item._fid.base; item.name = String(item.name || '').replace(/ 🎁$/, ''); delete item._fid; }
                 return;
             }
             if (!item._fid) item._fid = { base: item.price };
-            var base = item._fid.base, q = +item.quantity || 0, n = Math.min(q, remaining(fp)), pr = +fp.price;
+            var base = item._fid.base, q = +item.quantity || 0, rem = quotaFor(fp, cu), n = Math.min(q, rem), pr = +fp.price;
             item.price = q > 0 ? (n >= q ? pr : Math.round((n * pr + (q - n) * base) / q * 10000) / 10000) : pr;
-            item._fid.n = n; item._fid.q = q; item._fid.promo = pr;
+            item._fid.n = n; item._fid.q = q; item._fid.promo = pr; item._fid.cli = isCli(fp) ? { per: +fp.perClient || 0, left: rem, name: firstName(cu) } : null;
             if (!/ 🎁$/.test(String(item.name || ''))) item.name = String(item.name || '') + ' 🎁';
         });
     }
@@ -4522,10 +4533,16 @@ function cxResvRefreshUi() {
                 var f = item._fid, kg = item.unitType === 'kg';
                 d.style.background = 'rgba(219,39,119,.12)'; d.style.color = '#be185d';
                 d.innerHTML = '🎁 Promo fidélité : ' + qtyTxt(f.n, kg) + (kg ? '' : ' ×') + ' ' + eur(f.promo) + (kg ? '/kg' : '') + ' au lieu de ' + eur(f.base) + ' · économie ' + eur((f.base - f.promo) * f.n)
-                    + (f.q > f.n ? '<br><span style="color:#b45309;">⚠️ Plus que ' + qtyTxt(f.n, kg) + ' en promo : ' + qtyTxt(f.q - f.n, kg) + ' au prix normal</span>' : '');
+                    + (f.cli ? '<br>👤 Offre personnelle de ' + cxEscF(f.cli.name || 'ce client') + ' : ' + qtyTxt(Math.max(0, f.cli.left - f.n), kg) + ' restant(s) sur ' + qtyTxt(f.cli.per, kg) + ' après cette vente' : '')
+                    + (f.q > f.n ? '<br><span style="color:#b45309;">⚠️ Plus que ' + qtyTxt(f.n, kg) + ' en promo' + (f.cli ? ' pour ce client' : '') + ' : ' + qtyTxt(f.q - f.n, kg) + ' au prix normal</span>' : '');
+            } else if (cu && active(p) && isCli(p.fidPromo) && !item._resv && inList(p.fidPromo, cu.id)) {
+                d.style.background = 'rgba(100,116,139,.1)'; d.style.color = '#475569';
+                d.innerHTML = '👤 Offre fidélité de ' + cxEscF(firstName(cu) || 'ce client') + ' épuisée (' + qtyTxt(usedBy(p.fidPromo, cu.id), p.unitType === 'kg') + '/' + qtyTxt(+p.fidPromo.perClient || 0, p.unitType === 'kg') + ') : prix normal';
             } else if (!cu && active(p) && !item._resv && +p.fidPromo.price < (+item.price || 0)) {
                 d.style.border = '1px dashed rgba(219,39,119,.45)'; d.style.color = '#9d174d';
-                d.innerHTML = '🎁 Promo fidélité ' + eur(p.fidPromo.price) + (p.unitType === 'kg' ? '/kg' : '') + ' : sélectionnez la carte fidélité du client au paiement';
+                d.innerHTML = isCli(p.fidPromo)
+                    ? '👤 Offre personnelle ' + eur(p.fidPromo.price) + (p.unitType === 'kg' ? '/kg' : '') + ' pour ' + (p.fidPromo.clients || []).length + ' client(s) fidélité : sélectionnez la carte du client au paiement'
+                    : '🎁 Promo fidélité ' + eur(p.fidPromo.price) + (p.unitType === 'kg' ? '/kg' : '') + ' : sélectionnez la carte fidélité du client au paiement';
             } else return;
             var host = el.querySelector('.cx-cl-name') || el;
             host.appendChild(d);
@@ -4580,11 +4597,13 @@ function cxResvRefreshUi() {
                         var p = all.find(function (x) { return String(x.id) === String(s.id); }); if (!p || !p.fidPromo) return;
                         var fp = p.fidPromo;
                         fp.sold = Math.round(((+fp.sold || 0) + s.n) * 1000) / 1000;
+                        if (isCli(fp) && cu) { if (!fp.used) fp.used = {}; fp.used[String(cu.id)] = Math.round((usedBy(fp, cu.id) + s.n) * 1000) / 1000; }
                         if (!Array.isArray(fp.log)) fp.log = [];
                         fp.log.unshift({ at: new Date().toISOString(), n: s.n, client: cu ? (cu.name || '') : '', cid: cu ? cu.id : null, src: 'Caisse Pro' });
                         if (fp.log.length > 300) fp.log.length = 300;
                         if (remaining(fp) <= 0 && !fp.outAt) fp.outAt = new Date().toISOString();
-                        msg.push(p.name + ' : ' + (remaining(fp) > 0 ? 'reste ' + qtyTxt(remaining(fp), p.unitType === 'kg') : 'offre épuisée'));
+                        if (isCli(fp) && cu) { var lf = cliLeft(fp, cu.id); msg.push(p.name + ' : ' + (lf > 0 ? 'il reste ' + qtyTxt(lf, p.unitType === 'kg') + '/' + qtyTxt(+fp.perClient || 0, p.unitType === 'kg') + ' à ' + (firstName(cu) || 'ce client') : 'offre de ' + (firstName(cu) || 'ce client') + ' terminée (prix normal ensuite)')); }
+                        else msg.push(p.name + ' : ' + (remaining(fp) > 0 ? 'reste ' + qtyTxt(remaining(fp), p.unitType === 'kg') : 'offre épuisée'));
                     });
                     localStorage.setItem('covo_products', JSON.stringify(all));
                     if (typeof cxLoadProducts === 'function') cxLoadProducts();
