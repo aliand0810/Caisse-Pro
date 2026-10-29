@@ -4558,6 +4558,27 @@ function cxResvRefreshUi() {
         }
     }
 
+    /* Article vendu jusqu'à la rupture : promo magasin retirée + promo fidélité en pause (prix normal au prochain approvisionnement) */
+    function clearRupture(ids) {
+        var all = JSON.parse(localStorage.getItem('covo_products') || '[]') || [], now = new Date().toISOString(), out = [];
+        ids.forEach(function (id) {
+            var p = all.find(function (x) { return String(x.id) === String(id); }); if (!p || (+p.stock || 0) > 0) return;
+            var w = [];
+            if (+p.promo > 0) {
+                var old = +p.promo; p.promo = 0; w.push('promo magasin');
+                if (!Array.isArray(p.stockHistory)) p.stockHistory = [];
+                p.stockHistory.push({ date: now, type: 'info', before: null, after: null, delta: 0, reason: 'Promotion retirée automatiquement (rupture de stock) → prix normal', user: 'Caisse Pro', meta: { source: 'promo_rupture', field: 'promo', old: old, new: 0 } });
+            }
+            if (p.fidPromo && p.fidPromo.on !== false) { p.fidPromo.on = false; p.fidPromo.pausedReason = 'rupture'; p.fidPromo.pausedAt = now; w.push('promo fidélité en pause'); }
+            if (w.length) out.push(p.name + ' (' + w.join(' + ') + ')');
+        });
+        if (!out.length) return;
+        localStorage.setItem('covo_products', JSON.stringify(all));
+        if (typeof cxLoadProducts === 'function') cxLoadProducts();
+        if (typeof cpDriveMarkDirty === 'function') cpDriveMarkDirty();
+        if (typeof cxRenderProducts === 'function') cxRenderProducts();
+        setTimeout(function () { toast('📦 Rupture de stock : promotion retirée — ' + out.join(' · ') + '. Prix normal au prochain approvisionnement.', 'info'); }, 1400);
+    }
     function boot() {
         if (typeof window.cxCartTotal !== 'function' || typeof window.cxRenderCart !== 'function' || typeof window._cxFinalizeSale !== 'function' || typeof window.cxPickClient !== 'function') {
             if ((boot.n = (boot.n || 0) + 1) < 100) setTimeout(boot, 300); return;
@@ -4612,6 +4633,7 @@ function cxResvRefreshUi() {
                     if (msg.length) setTimeout(function () { toast('🎁 Promo fidélité — ' + msg.join(' · '), 'info'); }, 900);
                 } catch (e) { console.warn('[Promo fidélité]', e); }
             }
+            if (C0 && cartArr() !== C0) { try { clearRupture(C0.map(function (it) { return it.id; })); } catch (e) { console.warn('[Promo rupture]', e); } }
             return r;
         };
         try { _cxFinalizeSale = window._cxFinalizeSale; } catch (e) {}
